@@ -1,6 +1,6 @@
-use crate::config::Profile;
+use crate::config::{ComboStepConfig, Profile};
 use crate::input::{VK_ESCAPE, is_vk_down, send_key_once};
-use crate::keymap::{KeySpec, parse_key_sequence, parse_key_specs, parse_single_key};
+use crate::keymap::{KeySpec, parse_key_specs, parse_single_key};
 use crate::win::{foreground_window_ime_open, foreground_window_title, is_target_window};
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
@@ -145,18 +145,21 @@ impl RuntimeProfile {
 struct RuntimeCombo {
     name: String,
     trigger: KeySpec,
-    steps: Vec<KeySpec>,
-    step_interval: Duration,
+    steps: Vec<RuntimeComboStep>,
+}
+
+#[derive(Clone)]
+struct RuntimeComboStep {
+    key: KeySpec,
+    interval: Duration,
     press_duration: Duration,
 }
 
 struct ActiveCombo {
     name: String,
-    steps: Vec<KeySpec>,
+    steps: Vec<RuntimeComboStep>,
     next_index: usize,
     next_at: Instant,
-    step_interval: Duration,
-    press_duration: Duration,
 }
 
 fn print_start_summary(runtime: &RuntimeProfile) {
@@ -189,7 +192,14 @@ fn print_start_summary(runtime: &RuntimeProfile) {
                         combo
                             .steps
                             .iter()
-                            .map(|step| step.name)
+                            .map(|step| {
+                                format!(
+                                    "{}@{}ms/{}ms",
+                                    step.key.name,
+                                    step.interval.as_millis(),
+                                    step.press_duration.as_millis()
+                                )
+                            })
                             .collect::<Vec<_>>()
                             .join(",")
                     )
@@ -301,15 +311,27 @@ fn build_runtime_combos(profile: &Profile) -> Result<Vec<RuntimeCombo>> {
         .map(|combo| {
             let trigger = parse_single_key(&combo.trigger_key)
                 .with_context(|| format!("invalid trigger_key in combo '{}'", combo.name))?;
-            let steps = parse_key_sequence(&combo.sequence_keys)
-                .with_context(|| format!("invalid sequence_keys in combo '{}'", combo.name))?;
+            let steps = build_runtime_combo_steps(&combo.steps)
+                .with_context(|| format!("invalid steps in combo '{}'", combo.name))?;
 
             Ok(RuntimeCombo {
                 name: combo.name.clone(),
                 trigger,
                 steps,
-                step_interval: Duration::from_millis(combo.step_interval_ms.max(1)),
-                press_duration: Duration::from_millis(combo.press_duration_ms.max(1)),
+            })
+        })
+        .collect()
+}
+
+fn build_runtime_combo_steps(steps: &[ComboStepConfig]) -> Result<Vec<RuntimeComboStep>> {
+    steps
+        .iter()
+        .map(|step| {
+            let key = parse_single_key(&step.key)?;
+            Ok(RuntimeComboStep {
+                key,
+                interval: Duration::from_millis(step.interval_ms.max(1)),
+                press_duration: Duration::from_millis(step.press_duration_ms.max(1)),
             })
         })
         .collect()
@@ -333,8 +355,6 @@ fn trigger_combos(
                 steps: combo.steps.clone(),
                 next_index: 0,
                 next_at: Instant::now(),
-                step_interval: combo.step_interval,
-                press_duration: combo.press_duration,
             });
         }
         trigger_states.insert(combo.trigger.vk, is_down);
@@ -350,13 +370,14 @@ fn run_due_combo_steps(active_combos: &mut Vec<ActiveCombo>) {
             continue;
         }
 
-        let step = combo.steps[combo.next_index];
-        send_key_once(step, combo.press_duration);
+        let step = combo.steps[combo.next_index].clone();
+        send_key_once(step.key, step.press_duration);
         combo.next_index += 1;
-        combo.next_at = Instant::now() + combo.step_interval;
 
         if combo.next_index >= combo.steps.len() {
             completed.push(index);
+        } else {
+            combo.next_at = Instant::now() + step.interval;
         }
     }
 
@@ -374,7 +395,7 @@ fn update_trigger_states(combos: &[RuntimeCombo], trigger_states: &mut HashMap<u
 #[cfg(test)]
 mod tests {
     use super::{AutoFireService, RunnerEvent, StopReason};
-    use crate::config::{ComboConfig, Profile};
+    use crate::config::{ComboConfig, ComboStepConfig, Profile};
     use std::sync::mpsc::channel;
     use std::time::Duration;
 
@@ -409,11 +430,29 @@ mod tests {
             press_duration_ms: 1,
             poll_interval_ms: 1,
             target_windows: vec!["DNF".to_string()],
+            quick_switch_hotkey: "LCTRL+Q".to_string(),
             combos: vec![ComboConfig {
                 name: "combo".to_string(),
                 trigger_key: "A".to_string(),
-                sequence_keys: vec!["A".to_string(), "A".to_string(), "D".to_string()],
-                step_interval_ms: 80,
+                steps: vec![
+                    ComboStepConfig {
+                        key: "A".to_string(),
+                        interval_ms: 80,
+                        press_duration_ms: 1,
+                    },
+                    ComboStepConfig {
+                        key: "A".to_string(),
+                        interval_ms: 90,
+                        press_duration_ms: 2,
+                    },
+                    ComboStepConfig {
+                        key: "D".to_string(),
+                        interval_ms: 100,
+                        press_duration_ms: 3,
+                    },
+                ],
+                sequence_keys: Vec::new(),
+                step_interval_ms: 0,
                 press_duration_ms: 1,
             }],
         };

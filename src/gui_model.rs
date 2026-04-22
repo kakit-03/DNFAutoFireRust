@@ -10,6 +10,7 @@ pub struct ProfileDraft {
     pub press_duration_ms: String,
     pub poll_interval_ms: String,
     pub target_windows_text: String,
+    pub quick_switch_hotkey: String,
     pub combos: Vec<ComboConfig>,
 }
 
@@ -22,6 +23,7 @@ impl ProfileDraft {
             press_duration_ms: profile.press_duration_ms.to_string(),
             poll_interval_ms: profile.poll_interval_ms.to_string(),
             target_windows_text: target_windows_to_text(&profile.target_windows),
+            quick_switch_hotkey: profile.quick_switch_hotkey.clone(),
             combos: profile.combos.clone(),
         }
     }
@@ -43,6 +45,7 @@ impl ProfileDraft {
             press_duration_ms,
             poll_interval_ms,
             target_windows,
+            quick_switch_hotkey: self.quick_switch_hotkey.trim().to_string(),
             combos: self.combos.clone(),
         }
         .normalized();
@@ -89,7 +92,7 @@ fn parse_ms(raw: &str, label: &str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::{ProfileDraft, target_windows_from_text, target_windows_to_text};
-    use crate::config::{ComboConfig, Profile};
+    use crate::config::{ComboConfig, ComboStepConfig, Profile};
 
     #[test]
     fn draft_roundtrip_keeps_all_profile_fields() {
@@ -99,11 +102,29 @@ mod tests {
             press_duration_ms: 3,
             poll_interval_ms: 2,
             target_windows: vec!["地下城与勇士".to_string(), "DNF".to_string()],
+            quick_switch_hotkey: "LCTRL+LSHIFT+Q".to_string(),
             combos: vec![ComboConfig {
                 name: "combo1".to_string(),
                 trigger_key: "U".to_string(),
-                sequence_keys: vec!["A".to_string(), "A".to_string(), "D".to_string()],
-                step_interval_ms: 80,
+                steps: vec![
+                    ComboStepConfig {
+                        key: "A".to_string(),
+                        interval_ms: 80,
+                        press_duration_ms: 1,
+                    },
+                    ComboStepConfig {
+                        key: "A".to_string(),
+                        interval_ms: 90,
+                        press_duration_ms: 2,
+                    },
+                    ComboStepConfig {
+                        key: "D".to_string(),
+                        interval_ms: 100,
+                        press_duration_ms: 3,
+                    },
+                ],
+                sequence_keys: Vec::new(),
+                step_interval_ms: 0,
                 press_duration_ms: 1,
             }],
         };
@@ -117,8 +138,12 @@ mod tests {
         assert_eq!(restored.press_duration_ms, profile.press_duration_ms);
         assert_eq!(restored.poll_interval_ms, profile.poll_interval_ms);
         assert_eq!(restored.target_windows, profile.target_windows);
+        assert_eq!(restored.quick_switch_hotkey, profile.quick_switch_hotkey);
         assert_eq!(restored.combos.len(), 1);
-        assert_eq!(restored.combos[0].sequence_keys, vec!["A", "A", "D"]);
+        assert_eq!(restored.combos[0].steps.len(), 3);
+        assert_eq!(restored.combos[0].steps[0].key, "A");
+        assert_eq!(restored.combos[0].steps[1].interval_ms, 90);
+        assert_eq!(restored.combos[0].steps[2].press_duration_ms, 3);
     }
 
     #[test]
@@ -138,16 +163,39 @@ mod tests {
             press_duration_ms: "1".to_string(),
             poll_interval_ms: "1".to_string(),
             target_windows_text: "DNF".to_string(),
+            quick_switch_hotkey: "LCTRL+Q".to_string(),
             combos: vec![ComboConfig {
                 name: "burst".to_string(),
                 trigger_key: "U".to_string(),
-                sequence_keys: vec!["A".to_string(), "A".to_string(), "S".to_string()],
-                step_interval_ms: 10,
+                steps: vec![
+                    ComboStepConfig {
+                        key: "A".to_string(),
+                        interval_ms: 10,
+                        press_duration_ms: 1,
+                    },
+                    ComboStepConfig {
+                        key: "A".to_string(),
+                        interval_ms: 20,
+                        press_duration_ms: 2,
+                    },
+                    ComboStepConfig {
+                        key: "S".to_string(),
+                        interval_ms: 30,
+                        press_duration_ms: 3,
+                    },
+                ],
+                sequence_keys: Vec::new(),
+                step_interval_ms: 0,
                 press_duration_ms: 1,
             }],
         };
 
         let (_, profile) = draft.to_named_profile().expect("draft -> profile");
-        assert_eq!(profile.combos[0].sequence_keys, vec!["A", "A", "S"]);
+        assert_eq!(profile.combos[0].steps.len(), 3);
+        assert_eq!(profile.combos[0].steps[0].key, "A");
+        assert_eq!(profile.combos[0].steps[1].key, "A");
+        assert_eq!(profile.combos[0].steps[2].key, "S");
+        assert_eq!(profile.combos[0].steps[2].interval_ms, 30);
+        assert_eq!(profile.combos[0].steps[2].press_duration_ms, 3);
     }
 }

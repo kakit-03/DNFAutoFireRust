@@ -9,8 +9,8 @@ mod win;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use config::{ComboConfig, ConfigStore, Profile};
-use keymap::{parse_key_sequence, parse_key_specs, parse_single_key};
+use config::{ComboConfig, ComboStepConfig, ConfigStore, Profile};
+use keymap::{parse_key_specs, parse_single_key};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -56,8 +56,6 @@ enum ConfigAction {
         poll_interval_ms: u64,
         #[arg(long, value_delimiter = ',')]
         windows: Vec<String>,
-        #[arg(long, default_value_t = false)]
-        set_default: bool,
     },
     AddCombo {
         #[arg(long)]
@@ -83,10 +81,6 @@ enum ConfigAction {
         #[arg(long)]
         name: String,
     },
-    SetDefault {
-        #[arg(long)]
-        name: String,
-    },
 }
 
 fn main() {
@@ -109,6 +103,8 @@ fn run() -> Result<()> {
             let profile = store
                 .get_profile(Some(&profile_name))
                 .with_context(|| format!("profile not found: {profile_name}"))?;
+            store.remember_started_profile(&profile_name)?;
+            store.save(&cli.config)?;
 
             println!("使用配置: {profile_name}");
             autofire::run(&profile)
@@ -153,7 +149,6 @@ fn handle_config_action(
             press_duration_ms,
             poll_interval_ms,
             windows,
-            set_default,
         } => {
             let target_windows = if windows.is_empty() {
                 vec!["地下城与勇士".to_string(), "DNF".to_string()]
@@ -161,11 +156,15 @@ fn handle_config_action(
                 windows
             };
 
-            let existing_combos = store
-                .get_profile(Some(&name))
-                .ok()
-                .map(|profile| profile.combos)
+            let existing_profile = store.get_profile(Some(&name)).ok();
+            let existing_combos = existing_profile
+                .as_ref()
+                .map(|profile| profile.combos.clone())
                 .unwrap_or_default();
+            let quick_switch_hotkey = existing_profile
+                .as_ref()
+                .map(|profile| profile.quick_switch_hotkey.clone())
+                .unwrap_or_else(|| Profile::default().quick_switch_hotkey);
 
             let profile = Profile {
                 enabled_keys: keys,
@@ -173,6 +172,7 @@ fn handle_config_action(
                 press_duration_ms,
                 poll_interval_ms,
                 target_windows,
+                quick_switch_hotkey,
                 combos: existing_combos,
             }
             .normalized();
@@ -183,9 +183,6 @@ fn handle_config_action(
             validate_combos(&profile.combos)?;
 
             store.upsert_profile(name.clone(), profile);
-            if set_default {
-                store.set_default_profile(&name)?;
-            }
             store.save(config_path)?;
 
             println!("配置已保存: {name}");
@@ -213,14 +210,24 @@ fn handle_config_action(
             let combo = ComboConfig {
                 name: name.clone(),
                 trigger_key,
-                sequence_keys,
-                step_interval_ms,
-                press_duration_ms,
+                steps: sequence_keys
+                    .into_iter()
+                    .map(|key| ComboStepConfig {
+                        key,
+                        interval_ms: step_interval_ms,
+                        press_duration_ms,
+                    })
+                    .collect(),
+                sequence_keys: Vec::new(),
+                step_interval_ms: 0,
+                press_duration_ms: 0,
             }
             .normalized();
             combo.validate()?;
             parse_single_key(&combo.trigger_key)?;
-            parse_key_sequence(&combo.sequence_keys)?;
+            for step in &combo.steps {
+                parse_single_key(&step.key)?;
+            }
 
             profile
                 .combos
@@ -264,19 +271,15 @@ fn handle_config_action(
             println!("配置已删除: {name}");
             Ok(())
         }
-        ConfigAction::SetDefault { name } => {
-            store.set_default_profile(&name)?;
-            store.save(config_path)?;
-            println!("默认配置已设置为: {name}");
-            Ok(())
-        }
     }
 }
 
 fn validate_combos(combos: &[ComboConfig]) -> Result<()> {
     for combo in combos {
         parse_single_key(&combo.trigger_key)?;
-        parse_key_sequence(&combo.sequence_keys)?;
+        for step in &combo.steps {
+            parse_single_key(&step.key)?;
+        }
     }
     Ok(())
 }

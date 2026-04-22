@@ -169,6 +169,7 @@ pub fn parse_key_specs(keys: &[String]) -> Result<Vec<KeySpec>> {
     Ok(parsed)
 }
 
+#[allow(dead_code)]
 pub fn parse_key_sequence(keys: &[String]) -> Result<Vec<KeySpec>> {
     if keys.is_empty() {
         bail!("sequence_keys cannot be empty");
@@ -186,6 +187,67 @@ pub fn parse_single_key(input: &str) -> Result<KeySpec> {
             SUPPORTED_KEY_NAMES.join(", ")
         )
     })
+}
+
+pub fn parse_hotkey(input: &str) -> Result<Vec<KeySpec>> {
+    let parts = input
+        .split('+')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(parse_single_key)
+        .collect::<Result<Vec<_>>>()?;
+
+    if parts.is_empty() {
+        bail!("quick_switch_hotkey cannot be empty");
+    }
+
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for spec in parts {
+        if seen.insert(spec.name) {
+            out.push(spec);
+        }
+    }
+
+    if !out.iter().any(|spec| !is_modifier_key(spec.name)) {
+        bail!("quick_switch_hotkey must include at least one non-modifier key");
+    }
+
+    Ok(out)
+}
+
+pub fn normalize_hotkey_text(input: &str) -> Result<String> {
+    let specs = parse_hotkey(input)?;
+    Ok(sort_hotkey_names(
+        specs
+            .iter()
+            .map(|spec| spec.name.to_string())
+            .collect::<Vec<_>>(),
+    )
+    .join("+"))
+}
+
+pub fn sort_hotkey_names<I>(names: I) -> Vec<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut unique = Vec::new();
+    let mut seen = HashSet::new();
+    for name in names {
+        if seen.insert(name.clone()) {
+            unique.push(name);
+        }
+    }
+
+    unique.sort_by_key(|name| hotkey_order(name));
+    unique
+}
+
+pub fn is_modifier_key(name: &str) -> bool {
+    matches!(
+        name,
+        "LCTRL" | "RCTRL" | "LSHIFT" | "RSHIFT" | "LALT" | "RALT" | "LWIN" | "RWIN" | "MENU"
+    )
 }
 
 fn normalize_key_name(name: &str) -> String {
@@ -243,9 +305,36 @@ fn normalize_key_name(name: &str) -> String {
     }
 }
 
+fn hotkey_order(name: &str) -> (u8, usize) {
+    let modifier_rank = match name {
+        "LCTRL" => Some(0),
+        "RCTRL" => Some(1),
+        "LSHIFT" => Some(2),
+        "RSHIFT" => Some(3),
+        "LALT" => Some(4),
+        "RALT" => Some(5),
+        "LWIN" => Some(6),
+        "RWIN" => Some(7),
+        "MENU" => Some(8),
+        _ => None,
+    };
+    if let Some(rank) = modifier_rank {
+        return (0, rank);
+    }
+
+    let supported_rank = SUPPORTED_KEY_NAMES
+        .iter()
+        .position(|candidate| *candidate == name)
+        .unwrap_or(usize::MAX);
+    (1, supported_rank)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_key_sequence, parse_key_specs, parse_single_key};
+    use super::{
+        normalize_hotkey_text, parse_hotkey, parse_key_sequence, parse_key_specs, parse_single_key,
+        sort_hotkey_names,
+    };
 
     #[test]
     fn parse_key_specs_supports_case_insensitive_and_alias() {
@@ -306,5 +395,37 @@ mod tests {
         assert_eq!(specs[0].name, "ENTER");
         assert_eq!(specs[1].name, "LSHIFT");
         assert_eq!(specs[2].name, "RSHIFT");
+    }
+
+    #[test]
+    fn parse_hotkey_supports_modifier_combos() {
+        let specs = parse_hotkey("ctrl + shift + q").expect("hotkey parse");
+        assert_eq!(specs.len(), 3);
+        assert_eq!(specs[0].name, "LCTRL");
+        assert_eq!(specs[1].name, "LSHIFT");
+        assert_eq!(specs[2].name, "Q");
+    }
+
+    #[test]
+    fn parse_hotkey_rejects_modifier_only_combo() {
+        assert!(parse_hotkey("ctrl+shift").is_err());
+    }
+
+    #[test]
+    fn normalize_hotkey_text_canonicalizes_tokens() {
+        assert_eq!(
+            normalize_hotkey_text(" shift + ctrl + q ").expect("normalize hotkey"),
+            "LCTRL+LSHIFT+Q"
+        );
+    }
+
+    #[test]
+    fn sort_hotkey_names_places_modifiers_first() {
+        let sorted = sort_hotkey_names(vec![
+            "Q".to_string(),
+            "LSHIFT".to_string(),
+            "LCTRL".to_string(),
+        ]);
+        assert_eq!(sorted, vec!["LCTRL", "LSHIFT", "Q"]);
     }
 }

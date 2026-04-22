@@ -5,10 +5,10 @@
 - 仅在目标窗口（默认关键字：`地下城与勇士`、`DNF`）前台时工作
 - 按住配置中的按键时进行连发
 - 支持一键连招：按一次触发键，按顺序执行多个按键
-- 提供 Win32 原生 GUI 配置界面，支持图形化编辑配置与启动/停止
+- 提供基于 `egui` 的 GUI 配置界面，支持图形化编辑配置与启动/停止
 - GUI 支持系统托盘常驻、单实例保护，并在托盘图标上区分开启/暂停/关闭状态
 - 按 `Esc` 退出
-- 使用 `configs.json` 管理多套配置（保存/删除/设置默认）
+- 使用 `configs.json` 管理多套配置（保存/删除，自动记住上次启动的配置）
 
 ## 运行
 
@@ -26,10 +26,15 @@ cargo run -- gui
 
 GUI 特性：
 
-- 左侧管理配置列表，可新建、保存、删除、设为默认
-- 右侧提供完整键盘视图，点击键帽即可切换是否加入连发
-- 右侧同时可编辑普通连发参数、目标窗口关键字和一键连招
-- 连招使用独立弹窗编辑，支持按步骤添加、删除、上移、下移
+- 下半左侧为“配置设置”，内部改为上下布局：上半左侧是定宽配置列表，上半右侧是配置名与时间参数，下半展示目标窗口关键字和快速切换热键
+- 上半区提供完整键盘视图，点击键帽即可切换是否加入连发，选中键会以高亮底色显示
+- 下半中间为“其他配置”，当前版本主要承载一键连招；主界面只显示步骤数，不展开步骤详情
+- 快速切换热键支持组合键，输入框会显示当前配置的热键，也可以点“录入热键”后直接按组合键
+- 在连发目标窗口中按下快速切换热键时，会弹出一个小型切换窗口：只显示配置列表，底部提供“切换并启动连发”“停止连发”两个按钮
+- 小型切换窗口支持键盘 `↑ / ↓` 选择配置，`Enter` 直接切换并启动，`Esc` 隐藏回系统托盘
+- 连招使用应用内弹窗编辑，支持键盘录入触发键、单步录入、连续录入、删除、上移、下移
+- 每个连招步骤都可以单独配置自己的间隔时间和按下时长
+- 保存连招后会立即持久化到当前配置文件，无需再单独点一次“保存配置”
 - 关闭主窗口或最小化时会缩到系统托盘，托盘菜单可显示/隐藏窗口、启动/停止连发、退出程序
 - 托盘图标会区分 `连发已开启 / 输入法暂停 / 连发已关闭`
 - GUI 为单实例，重复启动时会直接拒绝并提示使用现有托盘实例
@@ -53,7 +58,7 @@ cargo run -- config show --profile default
 保存配置：
 
 ```bash
-cargo run -- config save --name my-dnf --keys J,P,L,H --repeat-interval-ms 1 --press-duration-ms 1 --poll-interval-ms 1 --windows 地下城与勇士,DNF --set-default
+cargo run -- config save --name my-dnf --keys J,P,L,H --repeat-interval-ms 1 --press-duration-ms 1 --poll-interval-ms 1 --windows 地下城与勇士,DNF
 ```
 
 添加一键连招：
@@ -61,6 +66,8 @@ cargo run -- config save --name my-dnf --keys J,P,L,H --repeat-interval-ms 1 --p
 ```bash
 cargo run -- config add-combo --profile my-dnf --name combo1 --trigger-key U --sequence-keys A,S,D,F --step-interval-ms 80 --press-duration-ms 1
 ```
+
+说明：CLI 的 `add-combo` 会把同一个 `step-interval-ms` 应用到所有步骤；GUI 中可以继续把每一步改成独立间隔。
 
 删除一键连招：
 
@@ -74,12 +81,6 @@ cargo run -- config remove-combo --profile my-dnf --name combo1
 cargo run -- config delete --name my-dnf
 ```
 
-设置默认配置：
-
-```bash
-cargo run -- config set-default --name default
-```
-
 ## 默认配置
 
 首次运行会自动生成 `configs.json`，默认内容如下：
@@ -89,7 +90,10 @@ cargo run -- config set-default --name default
 - `press_duration_ms`: `1`
 - `poll_interval_ms`: `1`
 - `target_windows`: `地下城与勇士`, `DNF`
+- `quick_switch_hotkey`: `LCTRL+BACKQUOTE`
 - `combos`: `[]`
+
+之后每次通过 GUI 或 `cargo run -- run --profile <name>` 成功启动连发时，程序都会自动把该已保存配置记为下次的默认配置。
 
 ## 一键连招配置说明
 
@@ -97,6 +101,12 @@ cargo run -- config set-default --name default
 
 - `name`: 连招名称
 - `trigger_key`: 触发键，按下一次后执行整套连招
-- `sequence_keys`: 按顺序执行的按键列表，支持重复键
-- `step_interval_ms`: 每一步之间的时间间隔
-- `press_duration_ms`: 每一步按下到释放的持续时间
+- `steps`: 按顺序执行的步骤列表，每一步都包含 `key`、`interval_ms` 和 `press_duration_ms`
+
+GUI 中：
+
+- `录入触发键`: 直接按键盘设置触发键
+- `按键录入并追加`: 录入一个步骤
+- `开始连续录入`: 开启后可连续按键，持续追加多个步骤，直到点“停止连续录入”
+- 新增步骤时会实时显示最近一步
+- 编辑已有步骤时，可直接在步骤列表中修改该步骤的按键、`间隔(ms)`、`按下时长(ms)`，并使用末尾垃圾桶按钮删除

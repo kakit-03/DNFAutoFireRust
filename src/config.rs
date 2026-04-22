@@ -1,3 +1,4 @@
+use crate::keymap::{normalize_hotkey_text, parse_hotkey};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -7,13 +8,53 @@ use std::path::Path;
 const DEFAULT_PROFILE_NAME: &str = "default";
 const DEFAULT_KEYS: [&str; 4] = ["J", "P", "L", "H"];
 const DEFAULT_TARGET_WINDOWS: [&str; 2] = ["地下城与勇士", "DNF"];
+const DEFAULT_QUICK_SWITCH_HOTKEY: &str = "LCTRL+BACKQUOTE";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComboStepConfig {
+    pub key: String,
+    pub interval_ms: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub press_duration_ms: u64,
+}
+
+impl ComboStepConfig {
+    pub fn normalized_with_fallback(mut self, fallback_press_duration_ms: u64) -> Self {
+        self.key = self.key.trim().to_ascii_uppercase();
+        if self.interval_ms == 0 {
+            self.interval_ms = 1;
+        }
+        if self.press_duration_ms == 0 {
+            self.press_duration_ms = fallback_press_duration_ms.max(1);
+        }
+        self
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.key.is_empty() {
+            bail!("combo step key cannot be empty");
+        }
+        if self.interval_ms == 0 {
+            bail!("combo step interval_ms must be >= 1");
+        }
+        if self.press_duration_ms == 0 {
+            bail!("combo step press_duration_ms must be >= 1");
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComboConfig {
     pub name: String,
     pub trigger_key: String,
+    #[serde(default)]
+    pub steps: Vec<ComboStepConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sequence_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub step_interval_ms: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub press_duration_ms: u64,
 }
 
@@ -21,14 +62,29 @@ impl ComboConfig {
     pub fn normalized(mut self) -> Self {
         self.name = self.name.trim().to_string();
         self.trigger_key = self.trigger_key.trim().to_ascii_uppercase();
-        self.sequence_keys = normalize_key_sequence(&self.sequence_keys);
+        let fallback_interval = self.step_interval_ms.max(1);
+        let fallback_press_duration = self.press_duration_ms.max(1);
 
-        if self.step_interval_ms == 0 {
-            self.step_interval_ms = 1;
+        if self.steps.is_empty() {
+            self.steps = normalize_key_sequence(&self.sequence_keys)
+                .into_iter()
+                .map(|key| ComboStepConfig {
+                    key,
+                    interval_ms: fallback_interval,
+                    press_duration_ms: fallback_press_duration,
+                })
+                .collect();
+        } else {
+            self.steps = self
+                .steps
+                .into_iter()
+                .map(|step| step.normalized_with_fallback(fallback_press_duration))
+                .collect();
         }
-        if self.press_duration_ms == 0 {
-            self.press_duration_ms = 1;
-        }
+
+        self.sequence_keys.clear();
+        self.step_interval_ms = 0;
+        self.press_duration_ms = 0;
 
         self
     }
@@ -40,14 +96,11 @@ impl ComboConfig {
         if self.trigger_key.is_empty() {
             bail!("combo trigger_key cannot be empty");
         }
-        if self.sequence_keys.is_empty() {
-            bail!("combo sequence_keys cannot be empty");
+        if self.steps.is_empty() {
+            bail!("combo steps cannot be empty");
         }
-        if self.step_interval_ms == 0 {
-            bail!("combo step_interval_ms must be >= 1");
-        }
-        if self.press_duration_ms == 0 {
-            bail!("combo press_duration_ms must be >= 1");
+        for step in &self.steps {
+            step.validate()?;
         }
 
         Ok(())
@@ -61,6 +114,8 @@ pub struct Profile {
     pub press_duration_ms: u64,
     pub poll_interval_ms: u64,
     pub target_windows: Vec<String>,
+    #[serde(default = "default_quick_switch_hotkey")]
+    pub quick_switch_hotkey: String,
     #[serde(default)]
     pub combos: Vec<ComboConfig>,
 }
@@ -76,6 +131,7 @@ impl Default for Profile {
                 .iter()
                 .map(|s| (*s).to_string())
                 .collect(),
+            quick_switch_hotkey: DEFAULT_QUICK_SWITCH_HOTKEY.to_string(),
             combos: Vec::new(),
         }
     }
@@ -100,6 +156,8 @@ impl Profile {
                 .map(|s| (*s).to_string())
                 .collect();
         }
+        self.quick_switch_hotkey = normalize_hotkey_text_if_valid(&self.quick_switch_hotkey)
+            .unwrap_or_else(default_quick_switch_hotkey);
 
         if self.repeat_interval_ms == 0 {
             self.repeat_interval_ms = 1;
@@ -121,6 +179,7 @@ impl Profile {
         if self.target_windows.is_empty() {
             bail!("target_windows cannot be empty");
         }
+        parse_hotkey(&self.quick_switch_hotkey)?;
         if self.repeat_interval_ms == 0 {
             bail!("repeat_interval_ms must be >= 1");
         }
@@ -224,7 +283,7 @@ impl ConfigStore {
         Ok(())
     }
 
-    pub fn set_default_profile(&mut self, name: &str) -> Result<()> {
+    pub fn remember_started_profile(&mut self, name: &str) -> Result<()> {
         if !self.profiles.contains_key(name) {
             bail!("profile not found: {name}");
         }
@@ -253,6 +312,18 @@ impl ConfigStore {
 
         self
     }
+}
+
+fn default_quick_switch_hotkey() -> String {
+    DEFAULT_QUICK_SWITCH_HOTKEY.to_string()
+}
+
+fn normalize_hotkey_text_if_valid(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Some(default_quick_switch_hotkey());
+    }
+    normalize_hotkey_text(trimmed).ok()
 }
 
 fn normalize_tokens(tokens: &[String], uppercase: bool) -> Vec<String> {
@@ -289,6 +360,10 @@ fn ensure_unique_combo_names(combos: &[ComboConfig]) -> Result<()> {
     Ok(())
 }
 
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 fn normalize_key_sequence(tokens: &[String]) -> Vec<String> {
     tokens
         .iter()
@@ -305,7 +380,7 @@ fn normalize_key_sequence(tokens: &[String]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ComboConfig, ConfigStore, Profile};
+    use super::{ComboConfig, ComboStepConfig, ConfigStore, Profile};
 
     #[test]
     fn profile_normalize_adds_defaults_for_empty_fields() {
@@ -315,12 +390,14 @@ mod tests {
             press_duration_ms: 0,
             poll_interval_ms: 0,
             target_windows: Vec::new(),
+            quick_switch_hotkey: String::new(),
             combos: Vec::new(),
         }
         .normalized();
 
         assert!(!profile.enabled_keys.is_empty());
         assert!(!profile.target_windows.is_empty());
+        assert_eq!(profile.quick_switch_hotkey, "LCTRL+BACKQUOTE");
         assert_eq!(profile.repeat_interval_ms, 1);
         assert_eq!(profile.press_duration_ms, 1);
         assert_eq!(profile.poll_interval_ms, 1);
@@ -331,7 +408,24 @@ mod tests {
         let combo = ComboConfig {
             name: " test ".to_string(),
             trigger_key: "j".to_string(),
-            sequence_keys: vec!["a".to_string(), "a".to_string(), "b".to_string()],
+            steps: vec![
+                ComboStepConfig {
+                    key: "a".to_string(),
+                    interval_ms: 0,
+                    press_duration_ms: 0,
+                },
+                ComboStepConfig {
+                    key: "a".to_string(),
+                    interval_ms: 5,
+                    press_duration_ms: 2,
+                },
+                ComboStepConfig {
+                    key: "b".to_string(),
+                    interval_ms: 9,
+                    press_duration_ms: 3,
+                },
+            ],
+            sequence_keys: Vec::new(),
             step_interval_ms: 0,
             press_duration_ms: 0,
         }
@@ -339,9 +433,37 @@ mod tests {
 
         assert_eq!(combo.name, "test");
         assert_eq!(combo.trigger_key, "J");
-        assert_eq!(combo.sequence_keys, vec!["A", "A", "B"]);
-        assert_eq!(combo.step_interval_ms, 1);
-        assert_eq!(combo.press_duration_ms, 1);
+        assert_eq!(combo.steps.len(), 3);
+        assert_eq!(combo.steps[0].key, "A");
+        assert_eq!(combo.steps[0].interval_ms, 1);
+        assert_eq!(combo.steps[0].press_duration_ms, 1);
+        assert_eq!(combo.steps[1].key, "A");
+        assert_eq!(combo.steps[2].key, "B");
+        assert_eq!(combo.steps[2].press_duration_ms, 3);
+        assert_eq!(combo.press_duration_ms, 0);
+    }
+
+    #[test]
+    fn combo_normalize_migrates_legacy_sequence_keys() {
+        let combo = ComboConfig {
+            name: "legacy".to_string(),
+            trigger_key: "u".to_string(),
+            steps: Vec::new(),
+            sequence_keys: vec!["a".to_string(), "s".to_string(), "d".to_string()],
+            step_interval_ms: 80,
+            press_duration_ms: 1,
+        }
+        .normalized();
+
+        assert_eq!(combo.steps.len(), 3);
+        assert_eq!(combo.steps[0].key, "A");
+        assert_eq!(combo.steps[1].key, "S");
+        assert_eq!(combo.steps[2].key, "D");
+        assert_eq!(combo.steps[0].interval_ms, 80);
+        assert_eq!(combo.steps[0].press_duration_ms, 1);
+        assert!(combo.sequence_keys.is_empty());
+        assert_eq!(combo.step_interval_ms, 0);
+        assert_eq!(combo.press_duration_ms, 0);
     }
 
     #[test]
@@ -354,6 +476,29 @@ mod tests {
     }
 
     #[test]
+    fn remember_started_profile_updates_default_profile() {
+        let mut store = ConfigStore::default();
+        store.upsert_profile(
+            "raid".to_string(),
+            Profile {
+                enabled_keys: vec!["J".to_string()],
+                repeat_interval_ms: 1,
+                press_duration_ms: 1,
+                poll_interval_ms: 1,
+                target_windows: vec!["DNF".to_string()],
+                quick_switch_hotkey: "LCTRL+Q".to_string(),
+                combos: Vec::new(),
+            },
+        );
+
+        store
+            .remember_started_profile("raid")
+            .expect("remember started profile");
+
+        assert_eq!(store.default_profile, "raid");
+    }
+
+    #[test]
     fn duplicate_combo_names_are_rejected() {
         let profile = Profile {
             enabled_keys: vec!["J".to_string()],
@@ -361,24 +506,74 @@ mod tests {
             press_duration_ms: 1,
             poll_interval_ms: 1,
             target_windows: vec!["DNF".to_string()],
+            quick_switch_hotkey: "LCTRL+Q".to_string(),
             combos: vec![
                 ComboConfig {
                     name: "combo".to_string(),
                     trigger_key: "A".to_string(),
-                    sequence_keys: vec!["B".to_string()],
-                    step_interval_ms: 1,
+                    steps: vec![ComboStepConfig {
+                        key: "B".to_string(),
+                        interval_ms: 1,
+                        press_duration_ms: 1,
+                    }],
+                    sequence_keys: Vec::new(),
+                    step_interval_ms: 0,
                     press_duration_ms: 1,
                 },
                 ComboConfig {
                     name: "COMBO".to_string(),
                     trigger_key: "C".to_string(),
-                    sequence_keys: vec!["D".to_string()],
-                    step_interval_ms: 1,
+                    steps: vec![ComboStepConfig {
+                        key: "D".to_string(),
+                        interval_ms: 1,
+                        press_duration_ms: 1,
+                    }],
+                    sequence_keys: Vec::new(),
+                    step_interval_ms: 0,
                     press_duration_ms: 1,
                 },
             ],
         };
 
         assert!(profile.validate().is_err());
+    }
+
+    #[test]
+    fn store_normalized_migrates_legacy_combo_json() {
+        let raw = r#"{
+          "default_profile": "default",
+          "profiles": {
+            "default": {
+              "enabled_keys": ["J"],
+              "repeat_interval_ms": 1,
+              "press_duration_ms": 1,
+              "poll_interval_ms": 1,
+              "target_windows": ["DNF"],
+              "combos": [
+                {
+                  "name": "legacy",
+                  "trigger_key": "u",
+                  "sequence_keys": ["a", "s", "d"],
+                  "step_interval_ms": 80,
+                  "press_duration_ms": 1
+                }
+              ]
+            }
+          }
+        }"#;
+
+        let store: ConfigStore = serde_json::from_str(raw).expect("legacy config json");
+        let normalized = store.normalized();
+        let combo = &normalized.profiles["default"].combos[0];
+
+        assert_eq!(combo.trigger_key, "U");
+        assert_eq!(combo.steps.len(), 3);
+        assert_eq!(combo.steps[0].key, "A");
+        assert_eq!(combo.steps[1].key, "S");
+        assert_eq!(combo.steps[2].key, "D");
+        assert_eq!(combo.steps[0].interval_ms, 80);
+        assert_eq!(combo.steps[0].press_duration_ms, 1);
+        assert!(combo.sequence_keys.is_empty());
+        assert_eq!(combo.step_interval_ms, 0);
     }
 }
