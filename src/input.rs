@@ -5,8 +5,6 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, keybd_event,
 };
 
-pub const VK_ESCAPE: u16 = 0x1B;
-
 pub fn is_vk_down(vk: u16) -> bool {
     unsafe { (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0 }
 }

@@ -88,7 +88,9 @@ fn parse_ms(raw: &str, label: &str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::{ProfileDraft, target_windows_from_text, target_windows_to_text};
-    use crate::config::{ComboConfig, ComboStepConfig, Profile, SpecialKeyConfig};
+    use crate::config::{
+        ComboConfig, ComboStepConfig, LinkedTriggerMode, Profile, SpecialKeyConfig,
+    };
 
     #[test]
     fn draft_roundtrip_keeps_all_profile_fields() {
@@ -125,6 +127,7 @@ mod tests {
                 name: "follow".to_string(),
                 trigger_key: "A".to_string(),
                 linked_key: "B".to_string(),
+                trigger_mode: LinkedTriggerMode::Press,
                 interval_ms: 50,
                 press_duration_ms: 2,
             }],

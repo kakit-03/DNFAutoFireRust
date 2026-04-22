@@ -1,5 +1,7 @@
 use crate::autofire::{AutoFireService, RunnerEvent, RunnerHandle};
-use crate::config::{ComboConfig, ComboStepConfig, ConfigStore, Profile, SpecialKeyConfig};
+use crate::config::{
+    ComboConfig, ComboStepConfig, ConfigStore, LinkedTriggerMode, Profile, SpecialKeyConfig,
+};
 use crate::gui_model::{ProfileDraft, target_windows_from_text, target_windows_to_text};
 use crate::input::is_vk_down;
 use crate::keymap::{
@@ -43,6 +45,8 @@ const STATUS_IDLE: &str = "状态: 未运行";
 const STATUS_RUNNING: &str = "状态: 运行中";
 const STATUS_IME_PAUSED: &str = "状态: 输入法暂停";
 const STATUS_STOPPED: &str = "状态: 已停止";
+const PROJECT_GITHUB_URL: &str = "https://github.com/kakit-03/DNFAutoFireRust";
+const APP_ICON_SIZE: u32 = 256;
 const TRAY_ICON_SIZE: u32 = 32;
 const MAIN_WINDOW_WIDTH: i32 = 1300;
 const MAIN_WINDOW_HEIGHT: i32 = 870;
@@ -57,6 +61,18 @@ const KEYBOARD_KEY_HEIGHT: f32 = 30.0;
 const KEYBOARD_KEY_GAP: f32 = 4.0;
 const KEYBOARD_BLOCK_GAP: f32 = 12.0;
 const KEYBOARD_MARGIN: f32 = 12.0;
+const PROFILE_LIST_ITEM_HEIGHT: f32 = 32.0;
+const TARGET_WINDOWS_INPUT_HEIGHT: f32 = 110.0;
+const TARGET_WINDOWS_SECTION_HEIGHT: f32 = 200.0;
+const OTHER_CONFIG_VISIBLE_ROWS: f32 = 3.0;
+const OTHER_CONFIG_ROW_GAP: f32 = 6.0;
+const OTHER_CONFIG_LIST_HEIGHT: f32 =
+    PROFILE_LIST_ITEM_HEIGHT * OTHER_CONFIG_VISIBLE_ROWS + OTHER_CONFIG_ROW_GAP * 2.0;
+const COMBO_NAME_COLUMN_WIDTH: f32 = 120.0;
+const COMBO_TRIGGER_COLUMN_WIDTH: f32 = 70.0;
+const COMBO_STEP_COUNT_COLUMN_WIDTH: f32 = 52.0;
+const SPECIAL_KEY_NAME_COLUMN_WIDTH: f32 = 110.0;
+const SPECIAL_KEY_TYPE_COLUMN_WIDTH: f32 = 110.0;
 
 const KEYBOARD_BG_SELECTED: Color32 = Color32::from_rgb(191, 221, 255);
 const KEYBOARD_BG_NORMAL: Color32 = Color32::from_rgb(239, 243, 248);
@@ -167,6 +183,7 @@ struct SpecialKeyDialogState {
     auto_trigger_hotkey: String,
     linked_trigger_key: String,
     linked_target_key: String,
+    linked_trigger_mode: LinkedTriggerMode,
     repeat_interval_ms: String,
     press_duration_ms: String,
     linked_interval_ms: String,
@@ -237,13 +254,15 @@ struct EguiApp {
 
 pub fn run(config_path: PathBuf, store: ConfigStore) -> Result<()> {
     let instance_guard = SingleInstanceGuard::acquire()?;
+    let window_icon = load_window_icon(&project_asset_path("tp.png"))?;
 
     let native_options = NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("DNFAutoFire 配置")
             .with_inner_size([MAIN_WINDOW_WIDTH as f32, MAIN_WINDOW_HEIGHT as f32])
             .with_resizable(false)
-            .with_position([200.0, 120.0]),
+            .with_position([200.0, 120.0])
+            .with_icon(window_icon),
         ..Default::default()
     };
 
@@ -273,6 +292,14 @@ impl EguiApp {
     ) -> Result<Self> {
         configure_fonts(&cc.egui_ctx);
         cc.egui_ctx.set_visuals(egui::Visuals::light());
+        let mut style = (*cc.egui_ctx.style()).clone();
+        let mut scroll_style = egui::style::ScrollStyle::solid();
+        scroll_style.bar_width = 14.0;
+        scroll_style.handle_min_length = 24.0;
+        scroll_style.bar_inner_margin = 1.0;
+        scroll_style.foreground_color = true;
+        style.spacing.scroll = scroll_style;
+        cc.egui_ctx.set_style(style);
 
         let hwnd = hwnd_from_creation_context(cc).context("failed to get native window handle")?;
         let (event_tx, event_rx) = channel();
@@ -317,7 +344,8 @@ impl EguiApp {
                 AppEvent::TrayShowWindow => self.show_main_window()?,
                 AppEvent::TrayHideWindow => self.hide_main_window_to_tray()?,
                 AppEvent::TrayStartRunner => {
-                    self.state.start_runner_from_form(&self.event_tx, ctx)?
+                    self.state.start_runner_from_form(&self.event_tx, ctx)?;
+                    self.hide_main_window_to_tray()?;
                 }
                 AppEvent::TrayStopRunner => self.state.cancel_pending_start_and_request_stop(),
                 AppEvent::HotkeyOpenSwitcher => self.show_switcher_window()?,
@@ -361,19 +389,19 @@ impl EguiApp {
         }
 
         TopBottomPanel::top("keyboard_panel")
-            .default_height(360.0)
-            .min_height(260.0)
-            .resizable(true)
+            .exact_height(360.0)
+            .resizable(false)
             .show(ctx, |ui| {
                 self.render_keyboard_panel(ui);
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let available = ui.available_size();
-            let left_width = (available.x * 0.44).clamp(440.0, 620.0);
+            let left_width = (available.x * 0.40).clamp(400.0, 560.0);
             let right_width = 180.0;
             let spacing = 12.0;
-            let middle_width = (available.x - left_width - right_width - spacing * 2.0).max(280.0);
+            let middle_width =
+                (available.x - left_width - right_width - spacing * 2.0).clamp(320.0, 480.0);
             let panel_height = available.y;
 
             ui.horizontal_top(|ui| {
@@ -406,6 +434,7 @@ impl EguiApp {
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ScrollArea::vertical()
                     .id_salt("switcher_profile_list")
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
                     .max_height(340.0)
                     .show(ui, |ui| {
                         let names = self
@@ -556,10 +585,13 @@ impl EguiApp {
             ui.add_space(6.0);
 
             let full_width = ui.available_width();
-            let top_height = 250.0;
+            let top_height = 200.0;
             let list_width = 190.0;
             let split_spacing = 10.0;
             let right_width = (full_width - list_width - split_spacing).max(260.0);
+            let top_panel_inner_height = top_height - 18.0;
+            let profile_list_scroll_height =
+                (top_panel_inner_height - PROFILE_LIST_ITEM_HEIGHT * 1.5).max(80.0);
 
             ui.allocate_ui_with_layout(
                 Vec2::new(full_width, top_height),
@@ -571,12 +603,16 @@ impl EguiApp {
                             Layout::top_down(Align::Min),
                             |ui| {
                                 egui::Frame::group(ui.style()).show(ui, |ui| {
+                                    ui.set_min_height(top_panel_inner_height);
                                     ui.strong("配置列表");
                                     ui.add_space(6.0);
                                     ui.set_min_width(list_width);
                                     ScrollArea::vertical()
                                         .id_salt("profile_list_scroll")
-                                        .max_height(top_height - 38.0)
+                                        .scroll_bar_visibility(
+                                            egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
+                                        )
+                                        .max_height(profile_list_scroll_height)
                                         .show(ui, |ui| {
                                             let names = self
                                                 .state
@@ -619,6 +655,7 @@ impl EguiApp {
                             Layout::top_down(Align::Min),
                             |ui| {
                                 egui::Frame::group(ui.style()).show(ui, |ui| {
+                                    ui.set_min_height(top_panel_inner_height);
                                     ui.strong("配置内容");
                                     ui.add_space(6.0);
 
@@ -673,6 +710,14 @@ impl EguiApp {
                                             }
                                         }
                                         if ui
+                                            .add_enabled(editable, egui::Button::new("克隆配置"))
+                                            .clicked()
+                                        {
+                                            if let Err(err) = self.state.clone_profile() {
+                                                self.show_error(&format!("{err:#}"));
+                                            }
+                                        }
+                                        if ui
                                             .add_enabled(editable, egui::Button::new("删除"))
                                             .clicked()
                                         {
@@ -698,20 +743,33 @@ impl EguiApp {
 
             ui.add_space(10.0);
             ui.allocate_ui_with_layout(
-                Vec2::new(full_width, ui.available_height()),
+                Vec2::new(full_width, TARGET_WINDOWS_SECTION_HEIGHT),
                 Layout::top_down(Align::Min),
                 |ui| {
                     egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.set_min_height(TARGET_WINDOWS_SECTION_HEIGHT - 18.0);
                         ui.strong("目标窗口关键字");
                         ui.add_space(6.0);
-                        let response = ui.add_enabled(
-                            editable,
-                            egui::TextEdit::multiline(&mut self.state.global_target_windows_text)
-                                .desired_rows(5)
-                                .desired_width(f32::INFINITY),
-                        );
+                        let response = ui.add_enabled_ui(editable, |ui| {
+                            ScrollArea::vertical()
+                                .id_salt("global_target_windows_scroll")
+                                .scroll_bar_visibility(
+                                    egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
+                                )
+                                .max_height(TARGET_WINDOWS_INPUT_HEIGHT)
+                                .show(ui, |ui| {
+                                    ui.add(
+                                        egui::TextEdit::multiline(
+                                            &mut self.state.global_target_windows_text,
+                                        )
+                                        .desired_width(f32::INFINITY)
+                                        .desired_rows(6),
+                                    )
+                                })
+                                .inner
+                        });
                         if editable
-                            && response.changed()
+                            && response.inner.changed()
                             && let Err(err) = self.state.persist_global_target_windows_if_valid()
                         {
                             self.show_error(&format!("{err:#}"));
@@ -775,6 +833,7 @@ impl EguiApp {
 
             ScrollArea::vertical()
                 .id_salt("other_panel_scroll")
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
                 .show(ui, |ui| {
                     ui.strong("一键连招");
                     ui.add_space(6.0);
@@ -807,27 +866,83 @@ impl EguiApp {
                     ui.add_space(6.0);
                     egui::Grid::new("combo_header_grid")
                         .num_columns(3)
-                        .striped(true)
                         .spacing([12.0, 6.0])
                         .show(ui, |ui| {
-                            ui.strong("名称");
-                            ui.strong("触发键");
-                            ui.strong("步骤数");
+                            ui.add_sized(
+                                [COMBO_NAME_COLUMN_WIDTH, PROFILE_LIST_ITEM_HEIGHT],
+                                egui::Label::new(RichText::new("名称").strong()),
+                            );
+                            ui.add_sized(
+                                [COMBO_TRIGGER_COLUMN_WIDTH, PROFILE_LIST_ITEM_HEIGHT],
+                                egui::Label::new(RichText::new("触发键").strong()),
+                            );
+                            ui.add_sized(
+                                [COMBO_STEP_COUNT_COLUMN_WIDTH, PROFILE_LIST_ITEM_HEIGHT],
+                                egui::Label::new(RichText::new("步骤数").strong()),
+                            );
                             ui.end_row();
-
-                            for (index, combo) in self.state.draft.combos.iter().enumerate() {
-                                let selected = self.state.selected_combo_index == Some(index);
-                                if ui
-                                    .add(egui::Button::new(&combo.name).selected(selected))
-                                    .clicked()
-                                {
-                                    self.state.selected_combo_index = Some(index);
-                                }
-                                ui.label(display_key_name(&combo.trigger_key));
-                                ui.label(format!("{} 步", combo.steps.len()));
-                                ui.end_row();
-                            }
                         });
+
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(ui.available_width(), OTHER_CONFIG_LIST_HEIGHT),
+                        Layout::top_down(Align::Min),
+                        |ui| {
+                            ui.set_min_height(OTHER_CONFIG_LIST_HEIGHT);
+                            ScrollArea::vertical()
+                                .id_salt("combo_list_scroll")
+                                .scroll_bar_visibility(
+                                    egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
+                                )
+                                .max_height(OTHER_CONFIG_LIST_HEIGHT)
+                                .show(ui, |ui| {
+                                    egui::Grid::new("combo_body_grid")
+                                        .num_columns(3)
+                                        .striped(true)
+                                        .spacing([12.0, 6.0])
+                                        .show(ui, |ui| {
+                                            for (index, combo) in
+                                                self.state.draft.combos.iter().enumerate()
+                                            {
+                                                let selected =
+                                                    self.state.selected_combo_index == Some(index);
+                                                if ui
+                                                    .add(
+                                                        egui::Button::new(&combo.name)
+                                                            .selected(selected)
+                                                            .min_size(Vec2::new(
+                                                                COMBO_NAME_COLUMN_WIDTH,
+                                                                PROFILE_LIST_ITEM_HEIGHT,
+                                                            )),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    self.state.selected_combo_index = Some(index);
+                                                }
+                                                ui.add_sized(
+                                                    [
+                                                        COMBO_TRIGGER_COLUMN_WIDTH,
+                                                        PROFILE_LIST_ITEM_HEIGHT,
+                                                    ],
+                                                    egui::Label::new(display_key_name(
+                                                        &combo.trigger_key,
+                                                    )),
+                                                );
+                                                ui.add_sized(
+                                                    [
+                                                        COMBO_STEP_COUNT_COLUMN_WIDTH,
+                                                        PROFILE_LIST_ITEM_HEIGHT,
+                                                    ],
+                                                    egui::Label::new(format!(
+                                                        "{} 步",
+                                                        combo.steps.len()
+                                                    )),
+                                                );
+                                                ui.end_row();
+                                            }
+                                        });
+                                });
+                        },
+                    );
 
                     ui.add_space(16.0);
                     ui.separator();
@@ -862,40 +977,94 @@ impl EguiApp {
 
                     ui.add_space(6.0);
                     egui::Grid::new("special_key_grid")
-                        .num_columns(3)
-                        .striped(true)
+                        .num_columns(2)
                         .spacing([12.0, 6.0])
                         .show(ui, |ui| {
-                            ui.strong("名称");
-                            ui.strong("类型");
-                            ui.strong("摘要");
+                            ui.add_sized(
+                                [SPECIAL_KEY_NAME_COLUMN_WIDTH, PROFILE_LIST_ITEM_HEIGHT],
+                                egui::Label::new(RichText::new("名称").strong()),
+                            );
+                            ui.add_sized(
+                                [SPECIAL_KEY_TYPE_COLUMN_WIDTH, PROFILE_LIST_ITEM_HEIGHT],
+                                egui::Label::new(RichText::new("类型").strong()),
+                            );
                             ui.end_row();
-
-                            for (index, special) in self.state.draft.special_keys.iter().enumerate()
-                            {
-                                let selected = self.state.selected_special_key_index == Some(index);
-                                if ui
-                                    .add(
-                                        egui::Button::new(special.name())
-                                            .selected(selected)
-                                            .min_size(Vec2::new(110.0, 0.0)),
-                                    )
-                                    .clicked()
-                                {
-                                    self.state.selected_special_key_index = Some(index);
-                                }
-                                ui.label(special_key_kind_label(special));
-                                ui.label(special_key_summary(special));
-                                ui.end_row();
-                            }
                         });
+
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(ui.available_width(), OTHER_CONFIG_LIST_HEIGHT),
+                        Layout::top_down(Align::Min),
+                        |ui| {
+                            ui.set_min_height(OTHER_CONFIG_LIST_HEIGHT);
+                            ScrollArea::vertical()
+                                .id_salt("special_key_list_scroll")
+                                .scroll_bar_visibility(
+                                    egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
+                                )
+                                .max_height(OTHER_CONFIG_LIST_HEIGHT)
+                                .show(ui, |ui| {
+                                    egui::Grid::new("special_key_body_grid")
+                                        .num_columns(2)
+                                        .striped(true)
+                                        .spacing([12.0, 6.0])
+                                        .show(ui, |ui| {
+                                            for (index, special) in
+                                                self.state.draft.special_keys.iter().enumerate()
+                                            {
+                                                let selected =
+                                                    self.state.selected_special_key_index
+                                                        == Some(index);
+                                                if ui
+                                                    .add(
+                                                        egui::Button::new(special.name())
+                                                            .selected(selected)
+                                                            .min_size(Vec2::new(
+                                                                SPECIAL_KEY_NAME_COLUMN_WIDTH,
+                                                                PROFILE_LIST_ITEM_HEIGHT,
+                                                            )),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    self.state.selected_special_key_index =
+                                                        Some(index);
+                                                }
+                                                ui.add_sized(
+                                                    [
+                                                        SPECIAL_KEY_TYPE_COLUMN_WIDTH,
+                                                        PROFILE_LIST_ITEM_HEIGHT,
+                                                    ],
+                                                    egui::Label::new(special_key_kind_label(
+                                                        special,
+                                                    )),
+                                                );
+                                                ui.end_row();
+                                            }
+                                        });
+                                });
+                        },
+                    );
                 });
         });
     }
 
     fn render_action_panel(&mut self, ui: &mut egui::Ui) {
         let running = self.state.is_runner_active();
+        let panel_width = ui.available_width();
         egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_min_width(panel_width);
+            ui.heading("关于我们");
+            ui.add_space(12.0);
+            if ui
+                .button("GitHub 仓库")
+                .on_hover_text(PROJECT_GITHUB_URL)
+                .clicked()
+            {
+                ui.ctx()
+                    .open_url(egui::OpenUrl::new_tab(PROJECT_GITHUB_URL));
+            }
+        });
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_min_width(panel_width);
             ui.heading("运行控制");
             ui.add_space(12.0);
 
@@ -906,8 +1075,13 @@ impl EguiApp {
                 )
                 .clicked()
             {
-                if let Err(err) = self.state.start_runner_from_form(&self.event_tx, ui.ctx()) {
-                    self.show_error(&format!("{err:#}"));
+                match self.state.start_runner_from_form(&self.event_tx, ui.ctx()) {
+                    Ok(()) => {
+                        if let Err(err) = self.hide_main_window_to_tray() {
+                            self.show_error(&format!("{err:#}"));
+                        }
+                    }
+                    Err(err) => self.show_error(&format!("{err:#}")),
                 }
             }
 
@@ -919,7 +1093,7 @@ impl EguiApp {
                 )
                 .clicked()
             {
-                self.state.request_stop_runner();
+                self.state.cancel_pending_start_and_request_stop();
             }
 
             ui.add_space(16.0);
@@ -1141,8 +1315,12 @@ impl EguiApp {
 
                 ui.add_space(10.0);
                 ui.strong("步骤列表");
+                let stick_steps_to_bottom =
+                    dialog.capture_target == Some(ComboCaptureTarget::ContinuousSteps);
                 ScrollArea::vertical()
                     .id_salt("combo_sequence_scroll")
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+                    .stick_to_bottom(stick_steps_to_bottom)
                     .max_height(180.0)
                     .show(ui, |ui| {
                         let mut start_capture_step = None;
@@ -1458,6 +1636,20 @@ impl EguiApp {
                             }
                         });
                         ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.label("触发方式");
+                            ui.selectable_value(
+                                &mut dialog.linked_trigger_mode,
+                                LinkedTriggerMode::Press,
+                                "按下触发",
+                            );
+                            ui.selectable_value(
+                                &mut dialog.linked_trigger_mode,
+                                LinkedTriggerMode::Release,
+                                "松开触发",
+                            );
+                        });
+                        ui.add_space(8.0);
                         egui::Grid::new("special_linked_grid")
                             .num_columns(2)
                             .spacing([10.0, 8.0])
@@ -1567,7 +1759,11 @@ impl EguiApp {
     }
 
     fn show_main_window(&mut self) -> Result<()> {
+        self.state.cancel_pending_start_and_request_stop();
         self.state.window_mode = WindowMode::Main;
+        self.state.combo_dialog = None;
+        self.state.special_key_dialog = None;
+        self.state.stop_quick_switch_hotkey_capture();
         self.resize_window(MAIN_WINDOW_WIDTH, MAIN_WINDOW_HEIGHT);
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_RESTORE);
@@ -1871,6 +2067,28 @@ impl AppState {
         Ok(())
     }
 
+    fn clone_profile(&mut self) -> Result<()> {
+        let mut draft = self.build_draft_from_form();
+        let clone_name = self.generate_cloned_profile_name();
+        draft.name = clone_name.clone();
+        let (name, profile) = self.validate_draft(&draft)?;
+
+        self.store.upsert_profile(name.clone(), profile.clone());
+        self.store.save(&self.config_path)?;
+
+        self.current_profile_key = Some(name.clone());
+        self.draft = ProfileDraft::from_named_profile(&name, &profile);
+        self.sync_enabled_keys(&self.draft.enabled_keys.clone());
+        self.selected_combo_index = None;
+        self.combo_dialog = None;
+        self.selected_special_key_index = None;
+        self.special_key_dialog = None;
+        self.status_text = STATUS_STOPPED;
+        self.tray_state = TrayState::Disabled;
+        self.switcher_selected_profile = Some(name);
+        Ok(())
+    }
+
     fn delete_profile(&mut self) -> Result<()> {
         let current_key = self
             .current_profile_key
@@ -1929,6 +2147,8 @@ impl AppState {
     fn cancel_pending_start_and_request_stop(&mut self) {
         self.pending_switch_start_profile = None;
         self.request_stop_runner();
+        self.status_text = STATUS_STOPPED;
+        self.tray_state = TrayState::Disabled;
     }
 
     fn start_quick_switch_hotkey_capture(&mut self) {
@@ -2291,6 +2511,7 @@ impl AppState {
                 auto_trigger_hotkey: "未录入".to_string(),
                 linked_trigger_key: "未录入".to_string(),
                 linked_target_key: "未录入".to_string(),
+                linked_trigger_mode: LinkedTriggerMode::Press,
                 repeat_interval_ms: "80".to_string(),
                 press_duration_ms: "1".to_string(),
                 linked_interval_ms: "80".to_string(),
@@ -2424,6 +2645,7 @@ impl AppState {
                     name: name.to_string(),
                     trigger_key: dialog.linked_trigger_key.clone(),
                     linked_key: dialog.linked_target_key.clone(),
+                    trigger_mode: dialog.linked_trigger_mode,
                     interval_ms: parse_dialog_ms(&dialog.linked_interval_ms, "触发延迟")?,
                     press_duration_ms: parse_dialog_ms(
                         &dialog.linked_press_duration_ms,
@@ -2448,6 +2670,29 @@ impl AppState {
         let mut index = 1;
         loop {
             let candidate = format!("profile-{index}");
+            if !self.store.profiles.contains_key(&candidate) {
+                return candidate;
+            }
+            index += 1;
+        }
+    }
+
+    fn generate_cloned_profile_name(&self) -> String {
+        let base_name = self.draft.name.trim().trim_end_matches('-').to_string();
+        let mut base_name = if base_name.is_empty() {
+            self.current_profile_key
+                .clone()
+                .unwrap_or_else(|| "profile".to_string())
+        } else {
+            base_name
+        };
+        while let Some(stripped) = strip_clone_suffix(&base_name) {
+            base_name = stripped.to_string();
+        }
+
+        let mut index = 1;
+        loop {
+            let candidate = format!("{base_name}-cloned-{index}");
             if !self.store.profiles.contains_key(&candidate) {
                 return candidate;
             }
@@ -2664,30 +2909,18 @@ impl TrayResources {
                     let _ = menu_tx.send(AppEvent::TrayHideWindow);
                 }
                 TRAY_START_ID => {
-                    if menu_hidden_flag.load(Ordering::SeqCst) {
-                        unsafe {
-                            let hwnd = HWND(hwnd_raw as _);
-                            let _ = ShowWindow(hwnd, SW_RESTORE);
-                            let _ = SetForegroundWindow(hwnd);
-                        }
-                        menu_hidden_flag.store(false, Ordering::SeqCst);
-                        let _ = menu_tx.send(AppEvent::TrayShowWindow);
-                    }
                     let _ = menu_tx.send(AppEvent::TrayStartRunner);
                 }
                 TRAY_STOP_ID => {
-                    if menu_hidden_flag.load(Ordering::SeqCst) {
-                        unsafe {
-                            let hwnd = HWND(hwnd_raw as _);
-                            let _ = ShowWindow(hwnd, SW_RESTORE);
-                            let _ = SetForegroundWindow(hwnd);
-                        }
-                        menu_hidden_flag.store(false, Ordering::SeqCst);
-                        let _ = menu_tx.send(AppEvent::TrayShowWindow);
-                    }
                     let _ = menu_tx.send(AppEvent::TrayStopRunner);
                 }
                 TRAY_EXIT_ID => {
+                    unsafe {
+                        let hwnd = HWND(hwnd_raw as _);
+                        let _ = ShowWindow(hwnd, SW_RESTORE);
+                        let _ = SetForegroundWindow(hwnd);
+                    }
+                    menu_hidden_flag.store(false, Ordering::SeqCst);
                     let _ = menu_tx.send(AppEvent::TrayExit);
                 }
                 _ => {}
@@ -2779,6 +3012,22 @@ fn hwnd_from_creation_context(cc: &CreationContext<'_>) -> Result<HWND> {
 
 fn project_asset_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(name)
+}
+
+fn load_window_icon(path: &Path) -> Result<egui::IconData> {
+    let image = ImageReader::open(path)
+        .with_context(|| format!("failed to open window icon '{}'", path.display()))?
+        .decode()
+        .with_context(|| format!("failed to decode window icon '{}'", path.display()))?;
+    let rgba = image
+        .resize_exact(APP_ICON_SIZE, APP_ICON_SIZE, FilterType::Lanczos3)
+        .into_rgba8();
+    let (width, height) = rgba.dimensions();
+    Ok(egui::IconData {
+        rgba: rgba.into_raw(),
+        width,
+        height,
+    })
 }
 
 fn load_tray_icon_base(path: &Path) -> Result<image::RgbaImage> {
@@ -3564,6 +3813,7 @@ fn special_key_dialog_from_config(
             auto_trigger_hotkey: "未录入".to_string(),
             linked_trigger_key: "未录入".to_string(),
             linked_target_key: "未录入".to_string(),
+            linked_trigger_mode: LinkedTriggerMode::Press,
             repeat_interval_ms: repeat_interval_ms.to_string(),
             press_duration_ms: press_duration_ms.to_string(),
             linked_interval_ms: "80".to_string(),
@@ -3586,6 +3836,7 @@ fn special_key_dialog_from_config(
             auto_trigger_hotkey: display_hotkey_text(trigger_hotkey),
             linked_trigger_key: "未录入".to_string(),
             linked_target_key: "未录入".to_string(),
+            linked_trigger_mode: LinkedTriggerMode::Press,
             repeat_interval_ms: repeat_interval_ms.to_string(),
             press_duration_ms: press_duration_ms.to_string(),
             linked_interval_ms: "80".to_string(),
@@ -3597,6 +3848,7 @@ fn special_key_dialog_from_config(
             name,
             trigger_key,
             linked_key,
+            trigger_mode,
             interval_ms,
             press_duration_ms,
         } => SpecialKeyDialogState {
@@ -3608,6 +3860,7 @@ fn special_key_dialog_from_config(
             auto_trigger_hotkey: "未录入".to_string(),
             linked_trigger_key: trigger_key.clone(),
             linked_target_key: linked_key.clone(),
+            linked_trigger_mode: *trigger_mode,
             repeat_interval_ms: "80".to_string(),
             press_duration_ms: "1".to_string(),
             linked_interval_ms: interval_ms.to_string(),
@@ -3671,48 +3924,6 @@ fn special_key_kind_label(config: &SpecialKeyConfig) -> &'static str {
     }
 }
 
-fn special_key_summary(config: &SpecialKeyConfig) -> String {
-    match config {
-        SpecialKeyConfig::CustomAutofire {
-            key,
-            repeat_interval_ms,
-            press_duration_ms,
-            ..
-        } => format!(
-            "{} / {}ms / {}ms",
-            display_key_name(key),
-            repeat_interval_ms,
-            press_duration_ms
-        ),
-        SpecialKeyConfig::AutoTrigger {
-            key,
-            trigger_hotkey,
-            repeat_interval_ms,
-            press_duration_ms,
-            ..
-        } => format!(
-            "{} <= {} / {}ms / {}ms",
-            display_key_name(key),
-            display_hotkey_text(trigger_hotkey),
-            repeat_interval_ms,
-            press_duration_ms
-        ),
-        SpecialKeyConfig::LinkedKey {
-            trigger_key,
-            linked_key,
-            interval_ms,
-            press_duration_ms,
-            ..
-        } => format!(
-            "{} -> {} / {}ms / {}ms",
-            display_key_name(trigger_key),
-            display_key_name(linked_key),
-            interval_ms,
-            press_duration_ms
-        ),
-    }
-}
-
 fn capture_next_supported_key(
     previously_down: &HashSet<String>,
 ) -> (HashSet<String>, Option<String>) {
@@ -3754,13 +3965,21 @@ fn parse_dialog_ms(raw: &str, label: &str) -> Result<u64> {
     Ok(value)
 }
 
+fn strip_clone_suffix(name: &str) -> Option<&str> {
+    let (prefix, suffix) = name.rsplit_once("-cloned-")?;
+    if prefix.is_empty() || suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(prefix)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         AppState, ComboCaptureTarget, ComboDialogState, ComboStepDraft, SpecialKeyDialogState,
         SpecialKeyType,
     };
-    use crate::config::{ConfigStore, SpecialKeyConfig};
+    use crate::config::{ConfigStore, LinkedTriggerMode, SpecialKeyConfig};
     use std::collections::HashSet;
     use std::fs;
     use std::path::PathBuf;
@@ -3829,6 +4048,7 @@ mod tests {
             auto_trigger_hotkey: "LAlt+Q".to_string(),
             linked_trigger_key: "未录入".to_string(),
             linked_target_key: "未录入".to_string(),
+            linked_trigger_mode: LinkedTriggerMode::Press,
             repeat_interval_ms: "30".to_string(),
             press_duration_ms: "2".to_string(),
             linked_interval_ms: "80".to_string(),
@@ -3859,6 +4079,34 @@ mod tests {
             }
             _ => panic!("expected auto trigger special key"),
         }
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn clone_profile_uses_incrementing_cloned_suffix() {
+        let path = unique_test_config_path();
+        let mut state = AppState::new(path.clone(), ConfigStore::default());
+        state.setup_initial_state().expect("setup initial state");
+
+        state.clone_profile().expect("first clone should save");
+        assert_eq!(
+            state.current_profile_key.as_deref(),
+            Some("default-cloned-1")
+        );
+
+        state
+            .load_profile_from_store("default")
+            .expect("reload original profile");
+        state.clone_profile().expect("second clone should save");
+        assert_eq!(
+            state.current_profile_key.as_deref(),
+            Some("default-cloned-2")
+        );
+
+        let saved = ConfigStore::load_or_create(&path).expect("load saved config");
+        assert!(saved.profiles.contains_key("default-cloned-1"));
+        assert!(saved.profiles.contains_key("default-cloned-2"));
 
         let _ = fs::remove_file(path);
     }

@@ -127,9 +127,19 @@ pub enum SpecialKeyConfig {
         name: String,
         trigger_key: String,
         linked_key: String,
+        #[serde(default)]
+        trigger_mode: LinkedTriggerMode,
         interval_ms: u64,
         press_duration_ms: u64,
     },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkedTriggerMode {
+    #[default]
+    Press,
+    Release,
 }
 
 impl SpecialKeyConfig {
@@ -163,12 +173,14 @@ impl SpecialKeyConfig {
                 name,
                 trigger_key,
                 linked_key,
+                trigger_mode,
                 interval_ms,
                 press_duration_ms,
             } => Self::LinkedKey {
                 name: name.trim().to_string(),
                 trigger_key: trigger_key.trim().to_ascii_uppercase(),
                 linked_key: linked_key.trim().to_ascii_uppercase(),
+                trigger_mode,
                 interval_ms: interval_ms.max(1),
                 press_duration_ms: press_duration_ms.max(1),
             },
@@ -219,6 +231,7 @@ impl SpecialKeyConfig {
                 name,
                 trigger_key,
                 linked_key,
+                trigger_mode: _,
                 interval_ms,
                 press_duration_ms,
             } => {
@@ -558,7 +571,9 @@ fn normalize_special_hotkey_text(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ComboConfig, ComboStepConfig, ConfigStore, Profile, SpecialKeyConfig};
+    use super::{
+        ComboConfig, ComboStepConfig, ConfigStore, LinkedTriggerMode, Profile, SpecialKeyConfig,
+    };
 
     #[test]
     fn profile_normalize_adds_defaults_for_empty_fields() {
@@ -780,6 +795,7 @@ mod tests {
                     name: "link".to_string(),
                     trigger_key: "a".to_string(),
                     linked_key: "b".to_string(),
+                    trigger_mode: LinkedTriggerMode::Release,
                     interval_ms: 0,
                     press_duration_ms: 0,
                 },
@@ -808,6 +824,12 @@ mod tests {
             }
             _ => panic!("expected auto trigger"),
         }
+        match &profile.special_keys[2] {
+            SpecialKeyConfig::LinkedKey { trigger_mode, .. } => {
+                assert_eq!(*trigger_mode, LinkedTriggerMode::Release);
+            }
+            _ => panic!("expected linked key"),
+        }
         assert!(profile.validate().is_ok());
     }
 
@@ -824,6 +846,7 @@ mod tests {
                     name: "special".to_string(),
                     trigger_key: "A".to_string(),
                     linked_key: "B".to_string(),
+                    trigger_mode: LinkedTriggerMode::Press,
                     interval_ms: 1,
                     press_duration_ms: 1,
                 },

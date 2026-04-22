@@ -1,5 +1,5 @@
-use crate::config::{ComboStepConfig, Profile, SpecialKeyConfig};
-use crate::input::{VK_ESCAPE, is_vk_down, send_key_once};
+use crate::config::{ComboStepConfig, LinkedTriggerMode, Profile, SpecialKeyConfig};
+use crate::input::{is_vk_down, send_key_once};
 use crate::keymap::{KeySpec, parse_hotkey, parse_key_specs, parse_single_key};
 use crate::win::{foreground_window_ime_open, foreground_window_title, is_target_window};
 use anyhow::{Context, Result};
@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
-    EscapePressed,
     StopRequested,
 }
 
@@ -105,7 +104,6 @@ pub fn run(profile: &Profile, target_windows: &[String]) -> Result<()> {
                 RunnerEvent::Started => {}
                 RunnerEvent::PausedByIme => println!("检测到输入法开启，暂停连发。"),
                 RunnerEvent::ResumedFromIme => println!("输入法关闭，恢复连发。"),
-                RunnerEvent::Stopped(StopReason::EscapePressed) => println!("检测到 ESC，退出。"),
                 RunnerEvent::Stopped(StopReason::StopRequested) => println!("连发已停止。"),
             }
         })?;
@@ -208,6 +206,7 @@ struct RuntimeLinkedKey {
     name: String,
     trigger_key: KeySpec,
     linked_key: KeySpec,
+    trigger_mode: LinkedTriggerMode,
     interval: Duration,
     press_duration: Duration,
 }
@@ -299,9 +298,10 @@ fn print_start_summary(runtime: &RuntimeProfile) {
         }));
         items.extend(runtime.linked_keys.iter().map(|entry| {
             format!(
-                "{}[连携:{} -> {} @{}ms/{}ms]",
+                "{}[连携:{}{} -> {} @{}ms/{}ms]",
                 entry.name,
                 entry.trigger_key.name,
+                linked_trigger_mode_label(entry.trigger_mode),
                 entry.linked_key.name,
                 entry.interval.as_millis(),
                 entry.press_duration.as_millis()
@@ -309,7 +309,7 @@ fn print_start_summary(runtime: &RuntimeProfile) {
         }));
         println!("已加载特殊键位: {}", items.join("; "));
     }
-    println!("按住配置中的按键触发连发，按 ESC 退出。");
+    println!("按住配置中的按键触发连发。");
 }
 
 fn run_loop<F>(runtime: RuntimeProfile, stop_requested: Arc<AtomicBool>, on_event: F) -> Result<()>
@@ -336,10 +336,6 @@ where
     let stop_reason = loop {
         if stop_requested.load(Ordering::SeqCst) {
             break StopReason::StopRequested;
-        }
-
-        if is_vk_down(VK_ESCAPE) {
-            break StopReason::EscapePressed;
         }
 
         let title = foreground_window_title();
@@ -542,23 +538,26 @@ fn build_runtime_linked_keys(profile: &Profile) -> Result<Vec<RuntimeLinkedKey>>
                 name,
                 trigger_key,
                 linked_key,
+                trigger_mode,
                 interval_ms,
                 press_duration_ms,
             } => Some((
                 name,
                 trigger_key,
                 linked_key,
+                *trigger_mode,
                 interval_ms,
                 press_duration_ms,
             )),
             _ => None,
         })
         .map(
-            |(name, trigger_key, linked_key, interval_ms, press_duration_ms)| {
+            |(name, trigger_key, linked_key, trigger_mode, interval_ms, press_duration_ms)| {
                 Ok(RuntimeLinkedKey {
                     name: name.clone(),
                     trigger_key: parse_single_key(trigger_key)?,
                     linked_key: parse_single_key(linked_key)?,
+                    trigger_mode,
                     interval: Duration::from_millis((*interval_ms).max(1)),
                     press_duration: Duration::from_millis((*press_duration_ms).max(1)),
                 })
@@ -694,7 +693,11 @@ fn trigger_linked_keys(
     for (index, linked) in linked_keys.iter().enumerate() {
         let is_down = is_vk_down(linked.trigger_key.vk);
         let was_down = trigger_states.get(index).copied().unwrap_or(false);
-        if is_down && !was_down {
+        let should_trigger = match linked.trigger_mode {
+            LinkedTriggerMode::Press => is_down && !was_down,
+            LinkedTriggerMode::Release => !is_down && was_down,
+        };
+        if should_trigger {
             pending_linked_keys.push(PendingLinkedKey {
                 key: linked.linked_key,
                 execute_at: Instant::now() + linked.interval,
@@ -737,10 +740,19 @@ fn hotkey_is_down(hotkey: &RuntimeHotkey) -> bool {
     hotkey.specs.iter().all(|spec| is_vk_down(spec.vk))
 }
 
+fn linked_trigger_mode_label(mode: LinkedTriggerMode) -> &'static str {
+    match mode {
+        LinkedTriggerMode::Press => "[按下]",
+        LinkedTriggerMode::Release => "[松开]",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{AutoFireService, RunnerEvent, StopReason};
-    use crate::config::{ComboConfig, ComboStepConfig, Profile, SpecialKeyConfig};
+    use crate::config::{
+        ComboConfig, ComboStepConfig, LinkedTriggerMode, Profile, SpecialKeyConfig,
+    };
     use std::sync::mpsc::channel;
     use std::time::Duration;
 
@@ -817,6 +829,7 @@ mod tests {
                     name: "link".to_string(),
                     trigger_key: "A".to_string(),
                     linked_key: "B".to_string(),
+                    trigger_mode: LinkedTriggerMode::Release,
                     interval_ms: 6,
                     press_duration_ms: 7,
                 },
@@ -831,5 +844,9 @@ mod tests {
         assert_eq!(runtime.custom_autofires.len(), 1);
         assert_eq!(runtime.auto_triggers.len(), 1);
         assert_eq!(runtime.linked_keys.len(), 1);
+        assert_eq!(
+            runtime.linked_keys[0].trigger_mode,
+            LinkedTriggerMode::Release
+        );
     }
 }
