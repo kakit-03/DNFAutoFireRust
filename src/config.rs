@@ -1,3 +1,4 @@
+use crate::initial_config::INITIAL_CONFIG_JSON;
 use crate::keymap::normalize_hotkey_text;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -371,7 +372,7 @@ impl Default for ConfigStore {
 impl ConfigStore {
     pub fn load_or_create(path: &Path) -> Result<Self> {
         if !path.exists() {
-            let store = Self::default();
+            let store = Self::initial_template()?;
             store.save(path)?;
             return Ok(store);
         }
@@ -381,6 +382,12 @@ impl ConfigStore {
         let parsed: Self = serde_json::from_str(&content)
             .with_context(|| format!("invalid json in '{}'", path.display()))?;
         Ok(parsed.normalized())
+    }
+
+    fn initial_template() -> Result<Self> {
+        let store: Self = serde_json::from_str(INITIAL_CONFIG_JSON)
+            .context("invalid built-in initial config template")?;
+        Ok(store.normalized())
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -574,6 +581,8 @@ mod tests {
     use super::{
         ComboConfig, ComboStepConfig, ConfigStore, LinkedTriggerMode, Profile, SpecialKeyConfig,
     };
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn profile_normalize_adds_defaults_for_empty_fields() {
@@ -860,5 +869,32 @@ mod tests {
         };
 
         assert!(profile.validate().is_err());
+    }
+
+    #[test]
+    fn load_or_create_uses_embedded_initial_config_template() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("dnf-init-template-{unique}.json"));
+        if path.exists() {
+            std::fs::remove_file(&path).expect("remove stale temp config");
+        }
+
+        let store = ConfigStore::load_or_create(&path).expect("load initial template");
+
+        assert_eq!(store.default_profile, "默认配置");
+        assert_eq!(store.quick_switch_hotkey, "LALT+BACKQUOTE");
+        assert!(
+            store.profiles.contains_key("默认配置"),
+            "expected embedded template profile to exist"
+        );
+
+        let saved = std::fs::read_to_string(&path).expect("read saved config");
+        let saved_store: ConfigStore = serde_json::from_str(&saved).expect("parse saved config");
+        assert_eq!(saved_store.default_profile, "默认配置");
+
+        std::fs::remove_file(PathBuf::from(&path)).expect("cleanup temp config");
     }
 }

@@ -1,7 +1,13 @@
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 mod autofire;
 mod config;
 mod gui;
 mod gui_model;
+mod initial_config;
 mod input;
 mod keymap;
 mod single_instance;
@@ -95,7 +101,7 @@ fn run() -> Result<()> {
     let mut store = ConfigStore::load_or_create(&cli.config)
         .with_context(|| format!("failed to load config file '{}'", cli.config.display()))?;
 
-    match cli.command.unwrap_or(Command::Run { profile: None }) {
+    match cli.command.unwrap_or(Command::Gui) {
         Command::Run { profile } => {
             let profile_name = store
                 .profile_name_or_default(profile.as_deref())

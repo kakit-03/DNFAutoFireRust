@@ -1,6 +1,6 @@
 # DNFAutoFire (Rust)
 
-这个仓库已重构为 **Rust 版本的 DNFAutoFire**，核心行为与原 Python 项目一致：
+这个仓库已重构为 **Rust 版本的 [DNFAutoFire](https://github.com/mouyase/DNFAutoFire)**，核心行为与原 Python 项目一致：
 
 - 仅在目标窗口（默认关键字：`地下城与勇士`、`DNF`）前台时工作
 - 按住配置中的按键时进行连发
@@ -16,7 +16,9 @@
 cargo run -- run
 ```
 
-如果省略子命令，默认等价于 `run`。
+如果省略子命令，默认会打开 GUI 配置面板。
+
+Windows 的 `release` 构建会默认隐藏命令行窗口，双击 exe 时只显示 GUI。
 
 打开 GUI：
 
@@ -92,7 +94,7 @@ cargo run -- config delete --name my-dnf
 
 ## 默认配置
 
-首次运行会自动生成 `configs.json`，默认内容如下：
+首次运行如果找不到配置文件，会自动用程序内置的初始化模板生成 `configs.json`。当前内置模板来自项目中的 `configs.json`，默认内容如下：
 
 - `enabled_keys`: `J`, `P`, `L`, `H`
 - `repeat_interval_ms`: `1`
