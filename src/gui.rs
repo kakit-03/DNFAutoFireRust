@@ -1,23 +1,25 @@
 use crate::autofire::{AutoFireService, RunnerEvent, RunnerHandle};
-use crate::config::{ComboConfig, ComboStepConfig, ConfigStore, Profile};
-use crate::gui_model::ProfileDraft;
+use crate::config::{ComboConfig, ComboStepConfig, ConfigStore, Profile, SpecialKeyConfig};
+use crate::gui_model::{ProfileDraft, target_windows_from_text, target_windows_to_text};
 use crate::input::is_vk_down;
 use crate::keymap::{
-    KeySpec, parse_hotkey, parse_key_specs, parse_single_key, sort_hotkey_names,
-    supported_key_names,
+    HotkeyRegistration, display_hotkey_names, display_hotkey_text, display_key_name,
+    hotkey_registration, is_modifier_key, normalize_hotkey_text, parse_hotkey, parse_key_specs,
+    parse_single_key, sort_hotkey_names, supported_key_names,
 };
 use crate::single_instance::SingleInstanceGuard;
-use crate::win::{foreground_window_title, is_target_window};
+use crate::win::{foreground_window_is, foreground_window_title, is_target_window};
 use anyhow::{Context, Result, bail};
 use eframe::egui::{
     self, Align, Align2, Color32, FontData, FontDefinitions, FontFamily, FontId, Key, Layout, Pos2,
     Rect, RichText, ScrollArea, Sense, Stroke, TopBottomPanel, Vec2, ViewportCommand,
 };
 use eframe::{App, CreationContext, Frame, NativeOptions};
+use image::{ImageReader, imageops::FilterType};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::collections::HashSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -26,9 +28,14 @@ use std::time::Duration;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows::Win32::Foundation::HWND;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey,
+    UnregisterHotKey,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    MB_ICONERROR, MB_OK, MessageBoxW, SW_HIDE, SW_RESTORE, SWP_NOMOVE, SWP_NOZORDER,
-    SetForegroundWindow, SetWindowPos, ShowWindow,
+    DispatchMessageW, MB_ICONERROR, MB_OK, MSG, MessageBoxW, PM_REMOVE, PeekMessageW, SW_HIDE,
+    SW_RESTORE, SWP_NOMOVE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow,
+    TranslateMessage, WM_HOTKEY,
 };
 use windows::core::{HSTRING, w};
 
@@ -36,6 +43,7 @@ const STATUS_IDLE: &str = "状态: 未运行";
 const STATUS_RUNNING: &str = "状态: 运行中";
 const STATUS_IME_PAUSED: &str = "状态: 输入法暂停";
 const STATUS_STOPPED: &str = "状态: 已停止";
+const TRAY_ICON_SIZE: u32 = 32;
 const MAIN_WINDOW_WIDTH: i32 = 1300;
 const MAIN_WINDOW_HEIGHT: i32 = 870;
 const SWITCHER_WINDOW_WIDTH: i32 = 340;
@@ -133,11 +141,46 @@ struct ComboDialogState {
     capture_down_keys: HashSet<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpecialKeyType {
+    CustomAutofire,
+    AutoTrigger,
+    LinkedKey,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpecialKeyCaptureTarget {
+    CustomKey,
+    AutoTriggerKey,
+    AutoTriggerHotkey,
+    LinkedTriggerKey,
+    LinkedTargetKey,
+}
+
+#[derive(Clone)]
+struct SpecialKeyDialogState {
+    edit_index: Option<usize>,
+    config_type: SpecialKeyType,
+    name: String,
+    custom_key: String,
+    auto_trigger_key: String,
+    auto_trigger_hotkey: String,
+    linked_trigger_key: String,
+    linked_target_key: String,
+    repeat_interval_ms: String,
+    press_duration_ms: String,
+    linked_interval_ms: String,
+    linked_press_duration_ms: String,
+    capture_target: Option<SpecialKeyCaptureTarget>,
+    capture_down_keys: HashSet<String>,
+}
+
 struct AppState {
     config_path: PathBuf,
     store: ConfigStore,
     current_profile_key: Option<String>,
     draft: ProfileDraft,
+    global_target_windows_text: String,
     enabled_keys: HashSet<String>,
     tray_state: TrayState,
     window_hidden: bool,
@@ -145,17 +188,21 @@ struct AppState {
     runner: Option<RunnerHandle>,
     selected_combo_index: Option<usize>,
     combo_dialog: Option<ComboDialogState>,
+    selected_special_key_index: Option<usize>,
+    special_key_dialog: Option<SpecialKeyDialogState>,
     status_text: &'static str,
     last_minimized: bool,
     window_mode: WindowMode,
     switcher_selected_profile: Option<String>,
+    global_quick_switch_hotkey: String,
     quick_switch_hotkey_capturing: bool,
     quick_switch_hotkey_down_keys: HashSet<String>,
+    pending_switch_start_profile: Option<String>,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 struct QuickSwitchWatchConfig {
-    hotkey: Vec<KeySpec>,
+    hotkey: Option<HotkeyRegistration>,
     target_windows: Vec<String>,
 }
 
@@ -272,7 +319,7 @@ impl EguiApp {
                 AppEvent::TrayStartRunner => {
                     self.state.start_runner_from_form(&self.event_tx, ctx)?
                 }
-                AppEvent::TrayStopRunner => self.state.request_stop_runner(),
+                AppEvent::TrayStopRunner => self.state.cancel_pending_start_and_request_stop(),
                 AppEvent::HotkeyOpenSwitcher => self.show_switcher_window()?,
                 AppEvent::TrayExit => {
                     self.state.quitting = true;
@@ -298,8 +345,10 @@ impl EguiApp {
         }
         self.state.last_minimized = minimized;
 
-        self.state.poll_quick_switch_hotkey_capture(ctx);
+        self.state.poll_quick_switch_hotkey_capture(ctx)?;
         self.handle_switcher_keyboard(ctx)?;
+        self.state
+            .try_start_pending_switch_profile(&self.event_tx, ctx)?;
         self.sync_quick_switch_monitor();
         self.sync_tray_ui()?;
         Ok(())
@@ -349,6 +398,7 @@ impl EguiApp {
         });
 
         self.render_combo_dialog(ctx);
+        self.render_special_key_dialog(ctx);
     }
 
     fn render_switcher_window(&mut self, ctx: &egui::Context) {
@@ -401,7 +451,7 @@ impl EguiApp {
                         }
                     }
                     if ui.button("停止连发").clicked() {
-                        self.state.stop_runner_immediately();
+                        self.state.cancel_pending_start_and_request_stop();
                         if let Err(err) = self.hide_main_window_to_tray() {
                             self.show_error(&format!("{err:#}"));
                         }
@@ -654,21 +704,27 @@ impl EguiApp {
                     egui::Frame::group(ui.style()).show(ui, |ui| {
                         ui.strong("目标窗口关键字");
                         ui.add_space(6.0);
-                        ui.add_enabled(
+                        let response = ui.add_enabled(
                             editable,
-                            egui::TextEdit::multiline(&mut self.state.draft.target_windows_text)
+                            egui::TextEdit::multiline(&mut self.state.global_target_windows_text)
                                 .desired_rows(5)
                                 .desired_width(f32::INFINITY),
                         );
+                        if editable
+                            && response.changed()
+                            && let Err(err) = self.state.persist_global_target_windows_if_valid()
+                        {
+                            self.show_error(&format!("{err:#}"));
+                        }
 
                         ui.add_space(12.0);
                         ui.strong("快速切换热键");
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
                             ui.add_enabled(
-                                editable,
+                                false,
                                 egui::TextEdit::singleline(
-                                    &mut self.state.draft.quick_switch_hotkey,
+                                    &mut self.state.global_quick_switch_hotkey,
                                 )
                                 .desired_width(240.0),
                             );
@@ -692,13 +748,13 @@ impl EguiApp {
                                 .clicked()
                             {
                                 self.state.stop_quick_switch_hotkey_capture();
-                                self.state.draft.quick_switch_hotkey.clear();
+                                self.state.global_quick_switch_hotkey.clear();
                             }
                         });
                         let hotkey_tip = if self.state.quick_switch_hotkey_capturing {
-                            "正在录入组合键，请按住修饰键再按主键，全部松开后会写回输入框。"
+                            "正在录入组合键，请先按修饰键，再按一次主键即可完成录入，无需一直按住。"
                         } else {
-                            "可直接输入，例如 LCTRL+LSHIFT+Q；也可以点“录入热键”后直接按组合键。"
+                            "此处只显示当前全局热键；请点“录入热键”后直接按组合键。"
                         };
                         ui.label(
                             RichText::new(hotkey_tip)
@@ -767,8 +823,69 @@ impl EguiApp {
                                 {
                                     self.state.selected_combo_index = Some(index);
                                 }
-                                ui.label(&combo.trigger_key);
+                                ui.label(display_key_name(&combo.trigger_key));
                                 ui.label(format!("{} 步", combo.steps.len()));
+                                ui.end_row();
+                            }
+                        });
+
+                    ui.add_space(16.0);
+                    ui.separator();
+                    ui.add_space(12.0);
+                    ui.strong("特殊键位配置");
+                    ui.add_space(6.0);
+
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(editable, egui::Button::new("新增配置"))
+                            .clicked()
+                        {
+                            self.state.open_special_key_dialog(None);
+                        }
+                        if ui
+                            .add_enabled(editable, egui::Button::new("编辑配置"))
+                            .clicked()
+                        {
+                            if let Err(err) = self.state.open_selected_special_key_dialog() {
+                                self.show_error(&format!("{err:#}"));
+                            }
+                        }
+                        if ui
+                            .add_enabled(editable, egui::Button::new("删除配置"))
+                            .clicked()
+                        {
+                            if let Err(err) = self.state.remove_selected_special_key() {
+                                self.show_error(&format!("{err:#}"));
+                            }
+                        }
+                    });
+
+                    ui.add_space(6.0);
+                    egui::Grid::new("special_key_grid")
+                        .num_columns(3)
+                        .striped(true)
+                        .spacing([12.0, 6.0])
+                        .show(ui, |ui| {
+                            ui.strong("名称");
+                            ui.strong("类型");
+                            ui.strong("摘要");
+                            ui.end_row();
+
+                            for (index, special) in self.state.draft.special_keys.iter().enumerate()
+                            {
+                                let selected = self.state.selected_special_key_index == Some(index);
+                                if ui
+                                    .add(
+                                        egui::Button::new(special.name())
+                                            .selected(selected)
+                                            .min_size(Vec2::new(110.0, 0.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    self.state.selected_special_key_index = Some(index);
+                                }
+                                ui.label(special_key_kind_label(special));
+                                ui.label(special_key_summary(special));
                                 ui.end_row();
                             }
                         });
@@ -868,6 +985,46 @@ impl EguiApp {
         }
     }
 
+    fn poll_special_key_capture(&self, dialog: &mut SpecialKeyDialogState, ctx: &egui::Context) {
+        let Some(target) = dialog.capture_target else {
+            return;
+        };
+
+        ctx.request_repaint_after(Duration::from_millis(16));
+        let (current_down, captured_key) = capture_next_supported_key(&dialog.capture_down_keys);
+
+        match target {
+            SpecialKeyCaptureTarget::AutoTriggerHotkey => {
+                dialog.capture_down_keys = current_down.clone();
+                let Some(captured_key) = captured_key else {
+                    return;
+                };
+                if is_modifier_key(&captured_key) {
+                    return;
+                }
+                let ordered = sort_hotkey_names(current_down.into_iter().collect::<Vec<_>>());
+                dialog.auto_trigger_hotkey = display_hotkey_names(ordered);
+                dialog.capture_target = None;
+                dialog.capture_down_keys.clear();
+            }
+            _ => {
+                dialog.capture_down_keys = current_down;
+                let Some(key) = captured_key else {
+                    return;
+                };
+                match target {
+                    SpecialKeyCaptureTarget::CustomKey => dialog.custom_key = key,
+                    SpecialKeyCaptureTarget::AutoTriggerKey => dialog.auto_trigger_key = key,
+                    SpecialKeyCaptureTarget::LinkedTriggerKey => dialog.linked_trigger_key = key,
+                    SpecialKeyCaptureTarget::LinkedTargetKey => dialog.linked_target_key = key,
+                    SpecialKeyCaptureTarget::AutoTriggerHotkey => unreachable!(),
+                }
+                dialog.capture_target = None;
+                dialog.capture_down_keys.clear();
+            }
+        }
+    }
+
     fn render_combo_dialog(&mut self, ctx: &egui::Context) {
         let Some(mut dialog) = self.state.combo_dialog.take() else {
             return;
@@ -875,6 +1032,7 @@ impl EguiApp {
         self.poll_combo_capture(&mut dialog, ctx);
 
         let mut keep_open = true;
+        let mut close_requested = false;
         let title = if dialog.edit_index.is_some() {
             "编辑连招"
         } else {
@@ -884,6 +1042,7 @@ impl EguiApp {
         egui::Window::new(title)
             .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
             .collapsible(false)
+            .open(&mut keep_open)
             .resizable(false)
             .show(ctx, |ui| {
                 ui.set_min_width(640.0);
@@ -895,7 +1054,7 @@ impl EguiApp {
                     ui.vertical(|ui| {
                         ui.label("触发键");
                         ui.horizontal(|ui| {
-                            ui.monospace(dialog.trigger_key.as_str());
+                            ui.monospace(display_key_name(dialog.trigger_key.as_str()));
                             let label =
                                 if dialog.capture_target == Some(ComboCaptureTarget::Trigger) {
                                     "等待按键..."
@@ -965,7 +1124,9 @@ impl EguiApp {
                     ui.label(
                         RichText::new(format!(
                             "最近一步: {} / 间隔 {} ms / 按下 {} ms",
-                            last_step.key, last_step.interval_ms, last_step.press_duration_ms
+                            display_key_name(&last_step.key),
+                            last_step.interval_ms,
+                            last_step.press_duration_ms
                         ))
                         .size(12.5)
                         .color(Color32::from_rgb(55, 95, 165)),
@@ -1004,7 +1165,7 @@ impl EguiApp {
                                 ui.end_row();
 
                                 for index in 0..dialog.steps.len() {
-                                    let key_text = dialog.steps[index].key.clone();
+                                    let key_text = display_key_name(&dialog.steps[index].key);
                                     let selected = dialog.selected_step == Some(index);
                                     if ui
                                         .add(
@@ -1092,18 +1253,258 @@ impl EguiApp {
                 ui.horizontal(|ui| {
                     if ui.button("保存连招").clicked() {
                         match self.state.save_combo_dialog(&dialog) {
-                            Ok(()) => keep_open = false,
+                            Ok(()) => close_requested = true,
                             Err(err) => self.show_error(&format!("{err:#}")),
                         }
                     }
                     if ui.button("取消").clicked() {
-                        keep_open = false;
+                        close_requested = true;
                     }
                 });
             });
 
+        if close_requested {
+            keep_open = false;
+        }
         if keep_open {
             self.state.combo_dialog = Some(dialog);
+        }
+    }
+
+    fn render_special_key_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.state.special_key_dialog.take() else {
+            return;
+        };
+        self.poll_special_key_capture(&mut dialog, ctx);
+
+        let mut keep_open = true;
+        let mut close_requested = false;
+        let title = if dialog.edit_index.is_some() {
+            "编辑特殊键位配置"
+        } else {
+            "新增特殊键位配置"
+        };
+
+        egui::Window::new(title)
+            .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+            .collapsible(false)
+            .open(&mut keep_open)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.set_min_width(620.0);
+                ui.label("名称");
+                ui.text_edit_singleline(&mut dialog.name);
+                ui.add_space(8.0);
+
+                ui.label("类型");
+                ui.horizontal(|ui| {
+                    ui.selectable_value(
+                        &mut dialog.config_type,
+                        SpecialKeyType::CustomAutofire,
+                        "独立连发",
+                    );
+                    ui.selectable_value(
+                        &mut dialog.config_type,
+                        SpecialKeyType::AutoTrigger,
+                        "自动触发",
+                    );
+                    ui.selectable_value(
+                        &mut dialog.config_type,
+                        SpecialKeyType::LinkedKey,
+                        "连携键位",
+                    );
+                });
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(10.0);
+
+                match dialog.config_type {
+                    SpecialKeyType::CustomAutofire => {
+                        ui.horizontal(|ui| {
+                            ui.label("键位");
+                            ui.monospace(display_key_name(dialog.custom_key.as_str()));
+                            let label =
+                                if dialog.capture_target == Some(SpecialKeyCaptureTarget::CustomKey)
+                                {
+                                    "等待按键..."
+                                } else {
+                                    "录入键位"
+                                };
+                            if ui.button(label).clicked() {
+                                start_special_key_capture(
+                                    &mut dialog,
+                                    SpecialKeyCaptureTarget::CustomKey,
+                                );
+                            }
+                        });
+                        ui.add_space(8.0);
+                        egui::Grid::new("special_custom_grid")
+                            .num_columns(2)
+                            .spacing([10.0, 8.0])
+                            .show(ui, |ui| {
+                                ui.label("连发间隔(ms)");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut dialog.repeat_interval_ms)
+                                        .desired_width(100.0),
+                                );
+                                ui.end_row();
+
+                                ui.label("按下时长(ms)");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut dialog.press_duration_ms)
+                                        .desired_width(100.0),
+                                );
+                                ui.end_row();
+                            });
+                    }
+                    SpecialKeyType::AutoTrigger => {
+                        ui.horizontal(|ui| {
+                            ui.label("自动触发键位");
+                            ui.monospace(display_key_name(dialog.auto_trigger_key.as_str()));
+                            let label = if dialog.capture_target
+                                == Some(SpecialKeyCaptureTarget::AutoTriggerKey)
+                            {
+                                "等待按键..."
+                            } else {
+                                "录入键位"
+                            };
+                            if ui.button(label).clicked() {
+                                start_special_key_capture(
+                                    &mut dialog,
+                                    SpecialKeyCaptureTarget::AutoTriggerKey,
+                                );
+                            }
+                        });
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.label("触发热键");
+                            ui.monospace(dialog.auto_trigger_hotkey.as_str());
+                            let label = if dialog.capture_target
+                                == Some(SpecialKeyCaptureTarget::AutoTriggerHotkey)
+                            {
+                                "等待组合键..."
+                            } else {
+                                "录入热键"
+                            };
+                            if ui.button(label).clicked() {
+                                start_special_key_capture(
+                                    &mut dialog,
+                                    SpecialKeyCaptureTarget::AutoTriggerHotkey,
+                                );
+                            }
+                        });
+                        ui.label(
+                            RichText::new(
+                                "触发热键会切换该键位的自动触发开关；热键允许组合，但不能与全局快速切换热键冲突。",
+                            )
+                            .size(12.5)
+                            .color(Color32::from_rgb(95, 100, 110)),
+                        );
+                        ui.add_space(8.0);
+                        egui::Grid::new("special_auto_grid")
+                            .num_columns(2)
+                            .spacing([10.0, 8.0])
+                            .show(ui, |ui| {
+                                ui.label("触发间隔(ms)");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut dialog.repeat_interval_ms)
+                                        .desired_width(100.0),
+                                );
+                                ui.end_row();
+
+                                ui.label("按下时长(ms)");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut dialog.press_duration_ms)
+                                        .desired_width(100.0),
+                                );
+                                ui.end_row();
+                            });
+                    }
+                    SpecialKeyType::LinkedKey => {
+                        ui.horizontal(|ui| {
+                            ui.label("触发键");
+                            ui.monospace(display_key_name(dialog.linked_trigger_key.as_str()));
+                            let label = if dialog.capture_target
+                                == Some(SpecialKeyCaptureTarget::LinkedTriggerKey)
+                            {
+                                "等待按键..."
+                            } else {
+                                "录入触发键"
+                            };
+                            if ui.button(label).clicked() {
+                                start_special_key_capture(
+                                    &mut dialog,
+                                    SpecialKeyCaptureTarget::LinkedTriggerKey,
+                                );
+                            }
+                        });
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.label("连携键");
+                            ui.monospace(display_key_name(dialog.linked_target_key.as_str()));
+                            let label = if dialog.capture_target
+                                == Some(SpecialKeyCaptureTarget::LinkedTargetKey)
+                            {
+                                "等待按键..."
+                            } else {
+                                "录入连携键"
+                            };
+                            if ui.button(label).clicked() {
+                                start_special_key_capture(
+                                    &mut dialog,
+                                    SpecialKeyCaptureTarget::LinkedTargetKey,
+                                );
+                            }
+                        });
+                        ui.add_space(8.0);
+                        egui::Grid::new("special_linked_grid")
+                            .num_columns(2)
+                            .spacing([10.0, 8.0])
+                            .show(ui, |ui| {
+                                ui.label("触发延迟(ms)");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut dialog.linked_interval_ms)
+                                        .desired_width(100.0),
+                                );
+                                ui.end_row();
+
+                                ui.label("按下时长(ms)");
+                                ui.add(
+                                    egui::TextEdit::singleline(
+                                        &mut dialog.linked_press_duration_ms,
+                                    )
+                                    .desired_width(100.0),
+                                );
+                                ui.end_row();
+                            });
+                    }
+                }
+
+                if let Some(message) = special_key_capture_message(dialog.capture_target) {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(message).color(Color32::from_rgb(55, 95, 165)));
+                }
+
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button("保存配置").clicked() {
+                        match self.state.save_special_key_dialog(&dialog) {
+                            Ok(()) => close_requested = true,
+                            Err(err) => self.show_error(&format!("{err:#}")),
+                        }
+                    }
+                    if ui.button("取消").clicked() {
+                        close_requested = true;
+                    }
+                });
+            });
+
+        if close_requested {
+            keep_open = false;
+        }
+        if keep_open {
+            self.state.special_key_dialog = Some(dialog);
         }
     }
 
@@ -1181,6 +1582,7 @@ impl EguiApp {
     fn show_switcher_window(&mut self) -> Result<()> {
         self.state.window_mode = WindowMode::Switcher;
         self.state.combo_dialog = None;
+        self.state.special_key_dialog = None;
         self.state.stop_quick_switch_hotkey_capture();
         let names = self
             .state
@@ -1206,6 +1608,7 @@ impl EguiApp {
         self.window_hidden_flag.store(true, Ordering::SeqCst);
         self.state.last_minimized = false;
         self.state.combo_dialog = None;
+        self.state.special_key_dialog = None;
         self.state.stop_quick_switch_hotkey_capture();
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
@@ -1267,11 +1670,14 @@ impl Drop for EguiApp {
 impl AppState {
     fn new(config_path: PathBuf, store: ConfigStore) -> Self {
         let default_draft = ProfileDraft::from_named_profile("default", &Profile::default());
+        let global_quick_switch_hotkey = display_hotkey_text(&store.quick_switch_hotkey);
+        let global_target_windows_text = target_windows_to_text(&store.target_windows);
         let mut state = Self {
             config_path,
             store,
             current_profile_key: None,
             draft: default_draft,
+            global_target_windows_text,
             enabled_keys: HashSet::new(),
             tray_state: TrayState::Disabled,
             window_hidden: false,
@@ -1279,12 +1685,16 @@ impl AppState {
             runner: None,
             selected_combo_index: None,
             combo_dialog: None,
+            selected_special_key_index: None,
+            special_key_dialog: None,
             status_text: STATUS_IDLE,
             last_minimized: false,
             window_mode: WindowMode::Main,
             switcher_selected_profile: None,
+            global_quick_switch_hotkey,
             quick_switch_hotkey_capturing: false,
             quick_switch_hotkey_down_keys: HashSet::new(),
+            pending_switch_start_profile: None,
         };
         state.sync_enabled_keys(&state.draft.enabled_keys.clone());
         state
@@ -1320,6 +1730,8 @@ impl AppState {
         self.sync_enabled_keys(&draft.enabled_keys);
         self.selected_combo_index = None;
         self.combo_dialog = None;
+        self.selected_special_key_index = None;
+        self.special_key_dialog = None;
         self.status_text = STATUS_IDLE;
         self.tray_state = TrayState::Disabled;
         self.switcher_selected_profile = Some(name.to_string());
@@ -1347,6 +1759,14 @@ impl AppState {
         draft
     }
 
+    fn current_target_windows(&self) -> Result<Vec<String>> {
+        let target_windows = target_windows_from_text(&self.global_target_windows_text);
+        if target_windows.is_empty() {
+            bail!("请至少填写一个目标窗口关键字");
+        }
+        Ok(target_windows)
+    }
+
     fn selected_enabled_keys(&self) -> Vec<String> {
         supported_key_names()
             .iter()
@@ -1357,14 +1777,42 @@ impl AppState {
 
     fn validate_draft(&self, draft: &ProfileDraft) -> Result<(String, Profile)> {
         let (name, profile) = draft.to_named_profile()?;
+        let normalized_quick_switch_hotkey =
+            normalize_hotkey_text(&self.global_quick_switch_hotkey)?;
         if !profile.enabled_keys.is_empty() {
             parse_key_specs(&profile.enabled_keys)?;
         }
-        parse_hotkey(&profile.quick_switch_hotkey)?;
         for combo in &profile.combos {
             parse_single_key(&combo.trigger_key)?;
             for step in &combo.steps {
                 parse_single_key(&step.key)?;
+            }
+        }
+        for special in &profile.special_keys {
+            match special {
+                SpecialKeyConfig::CustomAutofire { key, .. } => {
+                    parse_single_key(key)?;
+                }
+                SpecialKeyConfig::AutoTrigger {
+                    key,
+                    trigger_hotkey,
+                    ..
+                } => {
+                    parse_single_key(key)?;
+                    let normalized_trigger_hotkey = normalize_hotkey_text(trigger_hotkey)?;
+                    parse_hotkey(&normalized_trigger_hotkey)?;
+                    if normalized_trigger_hotkey == normalized_quick_switch_hotkey {
+                        bail!("自动触发热键不能与全局快速切换热键冲突");
+                    }
+                }
+                SpecialKeyConfig::LinkedKey {
+                    trigger_key,
+                    linked_key,
+                    ..
+                } => {
+                    parse_single_key(trigger_key)?;
+                    parse_single_key(linked_key)?;
+                }
             }
         }
         Ok((name, profile))
@@ -1378,6 +1826,8 @@ impl AppState {
         self.sync_enabled_keys(&draft.enabled_keys);
         self.selected_combo_index = None;
         self.combo_dialog = None;
+        self.selected_special_key_index = None;
+        self.special_key_dialog = None;
         self.status_text = STATUS_IDLE;
         self.quick_switch_hotkey_capturing = false;
         self.quick_switch_hotkey_down_keys.clear();
@@ -1450,12 +1900,14 @@ impl AppState {
 
         let draft = self.build_draft_from_form();
         let (_, profile) = self.validate_draft(&draft)?;
+        let target_windows = self.current_target_windows()?;
         let tx = event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let mut handle = AutoFireService::start_with_events(profile, move |event| {
-            let _ = tx.send(AppEvent::Runner(event));
-            repaint_ctx.request_repaint();
-        })?;
+        let mut handle =
+            AutoFireService::start_with_events(profile, target_windows, move |event| {
+                let _ = tx.send(AppEvent::Runner(event));
+                repaint_ctx.request_repaint();
+            })?;
         if let Err(err) = self.remember_last_started_profile() {
             handle.stop();
             let _ = handle.wait();
@@ -1474,10 +1926,9 @@ impl AppState {
         }
     }
 
-    fn stop_runner_immediately(&mut self) {
-        self.shutdown_runner();
-        self.status_text = STATUS_STOPPED;
-        self.tray_state = TrayState::Disabled;
+    fn cancel_pending_start_and_request_stop(&mut self) {
+        self.pending_switch_start_profile = None;
+        self.request_stop_runner();
     }
 
     fn start_quick_switch_hotkey_capture(&mut self) {
@@ -1490,23 +1941,54 @@ impl AppState {
         self.quick_switch_hotkey_down_keys.clear();
     }
 
-    fn poll_quick_switch_hotkey_capture(&mut self, ctx: &egui::Context) {
+    fn poll_quick_switch_hotkey_capture(&mut self, ctx: &egui::Context) -> Result<()> {
         if !self.quick_switch_hotkey_capturing {
-            return;
+            return Ok(());
         }
 
         ctx.request_repaint_after(Duration::from_millis(16));
-        let current_down = currently_pressed_supported_keys();
-        if current_down.is_empty() {
-            if !self.quick_switch_hotkey_down_keys.is_empty() {
-                self.stop_quick_switch_hotkey_capture();
-            }
-            return;
+        let (current_down, captured_key) =
+            capture_next_supported_key(&self.quick_switch_hotkey_down_keys);
+        self.quick_switch_hotkey_down_keys = current_down.clone();
+
+        let Some(captured_key) = captured_key else {
+            return Ok(());
+        };
+        if is_modifier_key(&captured_key) {
+            return Ok(());
         }
 
-        self.quick_switch_hotkey_down_keys = current_down.clone();
         let ordered = sort_hotkey_names(current_down.into_iter().collect::<Vec<_>>());
-        self.draft.quick_switch_hotkey = ordered.join("+");
+        self.global_quick_switch_hotkey = display_hotkey_names(ordered);
+        self.stop_quick_switch_hotkey_capture();
+        self.persist_global_quick_switch_hotkey()?;
+        Ok(())
+    }
+
+    fn persist_global_quick_switch_hotkey(&mut self) -> Result<()> {
+        let normalized = normalize_hotkey_text(&self.global_quick_switch_hotkey)?;
+        self.store.quick_switch_hotkey = normalized.clone();
+        self.store.save(&self.config_path)?;
+        self.global_quick_switch_hotkey = display_hotkey_text(&normalized);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn persist_global_target_windows(&mut self) -> Result<()> {
+        let target_windows = self.current_target_windows()?;
+        self.store.target_windows = target_windows;
+        self.store.save(&self.config_path)?;
+        Ok(())
+    }
+
+    fn persist_global_target_windows_if_valid(&mut self) -> Result<()> {
+        let target_windows = target_windows_from_text(&self.global_target_windows_text);
+        if target_windows.is_empty() {
+            return Ok(());
+        }
+        self.store.target_windows = target_windows;
+        self.store.save(&self.config_path)?;
+        Ok(())
     }
 
     fn remember_last_started_profile(&mut self) -> Result<()> {
@@ -1575,24 +2057,45 @@ impl AppState {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("请先选择一个配置"))?;
         if self.is_runner_active() {
-            self.stop_runner_immediately();
+            self.pending_switch_start_profile = Some(selected);
+            self.request_stop_runner();
+            return Ok(());
         }
         self.load_profile_from_store(&selected)?;
         self.start_runner_from_form(event_tx, ctx)
     }
 
     fn quick_switch_watch_config(&self) -> QuickSwitchWatchConfig {
-        let Ok(profile) = self.store.get_profile(Some(&self.store.default_profile)) else {
+        let target_windows = target_windows_from_text(&self.global_target_windows_text);
+        if target_windows.is_empty() {
             return QuickSwitchWatchConfig::default();
-        };
-        let Ok(hotkey) = parse_hotkey(&profile.quick_switch_hotkey) else {
+        }
+
+        let Ok(hotkey) = hotkey_registration(&self.global_quick_switch_hotkey) else {
             return QuickSwitchWatchConfig::default();
         };
 
         QuickSwitchWatchConfig {
-            hotkey,
-            target_windows: profile.target_windows,
+            hotkey: Some(hotkey),
+            target_windows,
         }
+    }
+
+    fn try_start_pending_switch_profile(
+        &mut self,
+        event_tx: &Sender<AppEvent>,
+        ctx: &egui::Context,
+    ) -> Result<()> {
+        if self.runner.is_some() {
+            return Ok(());
+        }
+
+        let Some(profile_name) = self.pending_switch_start_profile.take() else {
+            return Ok(());
+        };
+
+        self.load_profile_from_store(&profile_name)?;
+        self.start_runner_from_form(event_tx, ctx)
     }
 
     fn handle_runner_event(&mut self, event: RunnerEvent) -> Result<()> {
@@ -1728,14 +2231,10 @@ impl AppState {
             .get_profile(Some(&current_key))
             .with_context(|| format!("配置不存在: {current_key}"))?;
         profile.combos = self.draft.combos.clone();
+        profile.special_keys = self.draft.special_keys.clone();
         profile = profile.normalized();
         profile.validate()?;
-        for combo in &profile.combos {
-            parse_single_key(&combo.trigger_key)?;
-            for step in &combo.steps {
-                parse_single_key(&step.key)?;
-            }
-        }
+        self.validate_draft(&ProfileDraft::from_named_profile(&current_key, &profile))?;
 
         self.store.upsert_profile(current_key, profile);
         self.store.save(&self.config_path)?;
@@ -1779,6 +2278,172 @@ impl AppState {
         Ok(combo)
     }
 
+    fn open_special_key_dialog(&mut self, edit_index: Option<usize>) {
+        self.special_key_dialog = Some(if let Some(index) = edit_index {
+            special_key_dialog_from_config(index, &self.draft.special_keys[index])
+        } else {
+            SpecialKeyDialogState {
+                edit_index: None,
+                config_type: SpecialKeyType::CustomAutofire,
+                name: self.generate_special_key_name(),
+                custom_key: "未录入".to_string(),
+                auto_trigger_key: "未录入".to_string(),
+                auto_trigger_hotkey: "未录入".to_string(),
+                linked_trigger_key: "未录入".to_string(),
+                linked_target_key: "未录入".to_string(),
+                repeat_interval_ms: "80".to_string(),
+                press_duration_ms: "1".to_string(),
+                linked_interval_ms: "80".to_string(),
+                linked_press_duration_ms: "1".to_string(),
+                capture_target: None,
+                capture_down_keys: HashSet::new(),
+            }
+        });
+    }
+
+    fn open_selected_special_key_dialog(&mut self) -> Result<()> {
+        let Some(index) = self.selected_special_key_index else {
+            bail!("请先选中一个特殊键位配置");
+        };
+        self.open_special_key_dialog(Some(index));
+        Ok(())
+    }
+
+    fn remove_selected_special_key(&mut self) -> Result<()> {
+        let Some(index) = self.selected_special_key_index else {
+            bail!("请先选中一个特殊键位配置");
+        };
+        self.draft.special_keys.remove(index);
+        self.selected_special_key_index = None;
+        self.persist_special_key_changes()?;
+        Ok(())
+    }
+
+    fn save_special_key_dialog(&mut self, dialog: &SpecialKeyDialogState) -> Result<()> {
+        let special_key = self.read_special_key_from_dialog(dialog)?;
+        for (index, existing) in self.draft.special_keys.iter().enumerate() {
+            if Some(index) != dialog.edit_index
+                && existing.name().eq_ignore_ascii_case(special_key.name())
+            {
+                bail!("已存在同名特殊键位配置: {}", special_key.name());
+            }
+        }
+
+        if let Some(index) = dialog.edit_index {
+            self.draft.special_keys[index] = special_key;
+            self.selected_special_key_index = Some(index);
+        } else {
+            self.draft.special_keys.push(special_key);
+            self.selected_special_key_index = Some(self.draft.special_keys.len().saturating_sub(1));
+        }
+        self.persist_special_key_changes()?;
+        Ok(())
+    }
+
+    fn persist_special_key_changes(&mut self) -> Result<()> {
+        if self.current_profile_key.is_none()
+            || self
+                .current_profile_key
+                .as_deref()
+                .is_some_and(|name| self.draft.name.trim() != name)
+        {
+            return self.save_profile();
+        }
+
+        let current_key = self
+            .current_profile_key
+            .clone()
+            .expect("current_profile_key checked above");
+        let mut profile = self
+            .store
+            .get_profile(Some(&current_key))
+            .with_context(|| format!("配置不存在: {current_key}"))?;
+        profile.combos = self.draft.combos.clone();
+        profile.special_keys = self.draft.special_keys.clone();
+        profile = profile.normalized();
+        profile.validate()?;
+        self.validate_draft(&ProfileDraft::from_named_profile(&current_key, &profile))?;
+
+        self.store.upsert_profile(current_key, profile);
+        self.store.save(&self.config_path)?;
+        self.status_text = STATUS_STOPPED;
+        Ok(())
+    }
+
+    fn read_special_key_from_dialog(
+        &self,
+        dialog: &SpecialKeyDialogState,
+    ) -> Result<SpecialKeyConfig> {
+        let name = dialog.name.trim();
+        if name.is_empty() {
+            bail!("请填写配置名称");
+        }
+
+        let special = match dialog.config_type {
+            SpecialKeyType::CustomAutofire => {
+                if dialog.custom_key.trim().is_empty() || dialog.custom_key == "未录入" {
+                    bail!("请先录入独立连发键位");
+                }
+                SpecialKeyConfig::CustomAutofire {
+                    name: name.to_string(),
+                    key: dialog.custom_key.clone(),
+                    repeat_interval_ms: parse_dialog_ms(&dialog.repeat_interval_ms, "连发间隔")?,
+                    press_duration_ms: parse_dialog_ms(&dialog.press_duration_ms, "按下时长")?,
+                }
+            }
+            SpecialKeyType::AutoTrigger => {
+                if dialog.auto_trigger_key.trim().is_empty() || dialog.auto_trigger_key == "未录入"
+                {
+                    bail!("请先录入自动触发键位");
+                }
+                if dialog.auto_trigger_hotkey.trim().is_empty()
+                    || dialog.auto_trigger_hotkey == "未录入"
+                {
+                    bail!("请先录入自动触发热键");
+                }
+                SpecialKeyConfig::AutoTrigger {
+                    name: name.to_string(),
+                    key: dialog.auto_trigger_key.clone(),
+                    trigger_hotkey: dialog.auto_trigger_hotkey.clone(),
+                    repeat_interval_ms: parse_dialog_ms(&dialog.repeat_interval_ms, "触发间隔")?,
+                    press_duration_ms: parse_dialog_ms(&dialog.press_duration_ms, "按下时长")?,
+                }
+            }
+            SpecialKeyType::LinkedKey => {
+                if dialog.linked_trigger_key.trim().is_empty()
+                    || dialog.linked_trigger_key == "未录入"
+                {
+                    bail!("请先录入触发键");
+                }
+                if dialog.linked_target_key.trim().is_empty()
+                    || dialog.linked_target_key == "未录入"
+                {
+                    bail!("请先录入连携键");
+                }
+                SpecialKeyConfig::LinkedKey {
+                    name: name.to_string(),
+                    trigger_key: dialog.linked_trigger_key.clone(),
+                    linked_key: dialog.linked_target_key.clone(),
+                    interval_ms: parse_dialog_ms(&dialog.linked_interval_ms, "触发延迟")?,
+                    press_duration_ms: parse_dialog_ms(
+                        &dialog.linked_press_duration_ms,
+                        "按下时长",
+                    )?,
+                }
+            }
+        }
+        .normalized();
+
+        let mut draft = self.draft.clone();
+        if let Some(index) = dialog.edit_index {
+            draft.special_keys[index] = special.clone();
+        } else {
+            draft.special_keys.push(special.clone());
+        }
+        self.validate_draft(&draft)?;
+        Ok(special)
+    }
+
     fn generate_profile_name(&self) -> String {
         let mut index = 1;
         loop {
@@ -1805,6 +2470,22 @@ impl AppState {
             index += 1;
         }
     }
+
+    fn generate_special_key_name(&self) -> String {
+        let mut index = 1;
+        loop {
+            let candidate = format!("special-{index}");
+            if !self
+                .draft
+                .special_keys
+                .iter()
+                .any(|special| special.name().eq_ignore_ascii_case(&candidate))
+            {
+                return candidate;
+            }
+            index += 1;
+        }
+    }
 }
 
 impl QuickSwitchMonitor {
@@ -1824,45 +2505,79 @@ impl QuickSwitchMonitor {
         let hwnd_raw = hwnd.0 as isize;
 
         let join = thread::spawn(move || {
-            let mut was_pressed = false;
+            let hotkey_id = 0xD1FA;
+            let mut active_config = QuickSwitchWatchConfig::default();
+            let mut registered = false;
             while !join_stop.load(Ordering::SeqCst) {
                 let snapshot = join_config
                     .lock()
                     .map(|guard| guard.clone())
                     .unwrap_or_default();
-                if snapshot.hotkey.is_empty() || snapshot.target_windows.is_empty() {
-                    was_pressed = false;
-                    sleep(QUICK_SWITCH_POLL_INTERVAL);
-                    continue;
-                }
-
-                let title = foreground_window_title();
-                let is_target = is_target_window(&title, &snapshot.target_windows);
-                let hotkey_pressed =
-                    is_target && snapshot.hotkey.iter().all(|spec| is_vk_down(spec.vk));
-
-                if hotkey_pressed && !was_pressed {
-                    unsafe {
-                        let hwnd = HWND(hwnd_raw as _);
-                        let _ = SetWindowPos(
-                            hwnd,
-                            HWND::default(),
-                            0,
-                            0,
-                            SWITCHER_WINDOW_WIDTH,
-                            SWITCHER_WINDOW_HEIGHT,
-                            SWP_NOMOVE | SWP_NOZORDER,
-                        );
-                        let _ = ShowWindow(hwnd, SW_RESTORE);
-                        let _ = SetForegroundWindow(hwnd);
+                if snapshot != active_config {
+                    if registered {
+                        unsafe {
+                            let _ = UnregisterHotKey(HWND::default(), hotkey_id);
+                        }
+                        registered = false;
                     }
-                    join_hidden.store(false, Ordering::SeqCst);
-                    let _ = event_tx.send(AppEvent::HotkeyOpenSwitcher);
-                    join_ctx.request_repaint();
+
+                    if let Some(hotkey) = snapshot.hotkey {
+                        let modifiers =
+                            HOT_KEY_MODIFIERS(hotkey_modifiers(hotkey.modifiers) | MOD_NOREPEAT.0);
+                        registered = unsafe {
+                            RegisterHotKey(HWND::default(), hotkey_id, modifiers, hotkey.vk)
+                        }
+                        .is_ok();
+                    }
+                    active_config = snapshot.clone();
                 }
 
-                was_pressed = hotkey_pressed;
+                let mut msg = MSG::default();
+                while unsafe { PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_REMOVE) }.as_bool()
+                {
+                    if msg.message == WM_HOTKEY {
+                        if foreground_window_is(HWND(hwnd_raw as _)) {
+                            continue;
+                        }
+
+                        let title = foreground_window_title();
+                        let is_target = is_target_window(&title, &active_config.target_windows);
+                        if !is_target {
+                            continue;
+                        }
+
+                        unsafe {
+                            let hwnd = HWND(hwnd_raw as _);
+                            let _ = SetWindowPos(
+                                hwnd,
+                                HWND::default(),
+                                0,
+                                0,
+                                SWITCHER_WINDOW_WIDTH,
+                                SWITCHER_WINDOW_HEIGHT,
+                                SWP_NOMOVE | SWP_NOZORDER,
+                            );
+                            let _ = ShowWindow(hwnd, SW_RESTORE);
+                            let _ = SetForegroundWindow(hwnd);
+                        }
+                        join_hidden.store(false, Ordering::SeqCst);
+                        let _ = event_tx.send(AppEvent::HotkeyOpenSwitcher);
+                        join_ctx.request_repaint();
+                    } else {
+                        unsafe {
+                            let _ = TranslateMessage(&msg);
+                            DispatchMessageW(&msg);
+                        }
+                    }
+                }
+
                 sleep(QUICK_SWITCH_POLL_INTERVAL);
+            }
+
+            if registered {
+                unsafe {
+                    let _ = UnregisterHotKey(HWND::default(), hotkey_id);
+                }
             }
         });
 
@@ -1895,9 +2610,10 @@ impl TrayResources {
         window_hidden_flag: Arc<AtomicBool>,
     ) -> Result<Self> {
         let hwnd_raw = hwnd.0 as isize;
-        let enabled_icon = solid_tray_icon([64, 136, 240, 255])?;
-        let paused_icon = solid_tray_icon([235, 184, 62, 255])?;
-        let disabled_icon = solid_tray_icon([215, 79, 79, 255])?;
+        let tray_base = load_tray_icon_base(&project_asset_path("tp.png"))?;
+        let enabled_icon = tray_icon_with_status_dot(&tray_base, [73, 173, 84, 255])?;
+        let paused_icon = tray_icon_with_status_dot(&tray_base, [235, 184, 62, 255])?;
+        let disabled_icon = tray_icon_with_status_dot(&tray_base, [219, 78, 78, 255])?;
 
         let status_item = MenuItem::new("状态: 连发已关闭", false, None);
         let show_item = MenuItem::with_id(TRAY_SHOW_ID, "显示窗口", true, None);
@@ -2061,19 +2777,77 @@ fn hwnd_from_creation_context(cc: &CreationContext<'_>) -> Result<HWND> {
     }
 }
 
-fn solid_tray_icon(color: [u8; 4]) -> Result<Icon> {
-    let mut rgba = Vec::with_capacity(16 * 16 * 4);
-    for y in 0..16 {
-        for x in 0..16 {
-            let border = x == 0 || x == 15 || y == 0 || y == 15;
-            if border {
-                rgba.extend_from_slice(&[32, 32, 32, 255]);
-            } else {
-                rgba.extend_from_slice(&color);
+fn project_asset_path(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(name)
+}
+
+fn load_tray_icon_base(path: &Path) -> Result<image::RgbaImage> {
+    let image = ImageReader::open(&path)
+        .with_context(|| format!("failed to open tray icon '{}'", path.display()))?
+        .decode()
+        .with_context(|| format!("failed to decode tray icon '{}'", path.display()))?;
+    Ok(image
+        .resize_exact(TRAY_ICON_SIZE, TRAY_ICON_SIZE, FilterType::Lanczos3)
+        .into_rgba8())
+}
+
+fn tray_icon_with_status_dot(base: &image::RgbaImage, dot_color: [u8; 4]) -> Result<Icon> {
+    let mut rgba = base.clone();
+    paint_status_dot(&mut rgba, dot_color);
+    let (width, height) = rgba.dimensions();
+    Icon::from_rgba(rgba.into_raw(), width, height)
+        .context("failed to build tray icon with status dot")
+}
+
+fn paint_status_dot(image: &mut image::RgbaImage, dot_color: [u8; 4]) {
+    let width = image.width() as i32;
+    let height = image.height() as i32;
+    let outer_radius = 8i32;
+    let inner_radius = 7i32;
+    let center_x = width - outer_radius;
+    let center_y = height - outer_radius;
+
+    for y in (center_y - outer_radius)..=(center_y + outer_radius) {
+        if !(0..height).contains(&y) {
+            continue;
+        }
+        for x in (center_x - outer_radius)..=(center_x + outer_radius) {
+            if !(0..width).contains(&x) {
+                continue;
             }
+
+            let dx = x - center_x;
+            let dy = y - center_y;
+            let distance_squared = dx * dx + dy * dy;
+            if distance_squared > outer_radius * outer_radius {
+                continue;
+            }
+
+            let pixel = if distance_squared <= inner_radius * inner_radius {
+                image::Rgba(dot_color)
+            } else {
+                image::Rgba([255, 255, 255, 255])
+            };
+            image.put_pixel(x as u32, y as u32, pixel);
         }
     }
-    Icon::from_rgba(rgba, 16, 16).context("failed to build tray icon")
+}
+
+fn hotkey_modifiers(bits: u32) -> u32 {
+    let mut modifiers = 0u32;
+    if bits & 0x0001 != 0 {
+        modifiers |= MOD_ALT.0;
+    }
+    if bits & 0x0002 != 0 {
+        modifiers |= MOD_CONTROL.0;
+    }
+    if bits & 0x0004 != 0 {
+        modifiers |= MOD_SHIFT.0;
+    }
+    if bits & 0x0008 != 0 {
+        modifiers |= MOD_WIN.0;
+    }
+    modifiers
 }
 
 fn scaled_key_rect(origin: Pos2, scale: f32, key: &KeyboardLayoutKey) -> Rect {
@@ -2211,7 +2985,7 @@ fn keyboard_layout_keys() -> Vec<KeyboardLayoutKey> {
         &[
             KeyboardCell {
                 token: "BACKQUOTE",
-                label: "`",
+                label: "~",
                 width_units: 1.0,
             },
             KeyboardCell {
@@ -2771,7 +3545,85 @@ fn keyboard_units_to_px(units: f32) -> f32 {
     units * KEYBOARD_KEY_WIDTH + (units - 1.0) * KEYBOARD_KEY_GAP
 }
 
+fn special_key_dialog_from_config(
+    index: usize,
+    config: &SpecialKeyConfig,
+) -> SpecialKeyDialogState {
+    match config {
+        SpecialKeyConfig::CustomAutofire {
+            name,
+            key,
+            repeat_interval_ms,
+            press_duration_ms,
+        } => SpecialKeyDialogState {
+            edit_index: Some(index),
+            config_type: SpecialKeyType::CustomAutofire,
+            name: name.clone(),
+            custom_key: key.clone(),
+            auto_trigger_key: "未录入".to_string(),
+            auto_trigger_hotkey: "未录入".to_string(),
+            linked_trigger_key: "未录入".to_string(),
+            linked_target_key: "未录入".to_string(),
+            repeat_interval_ms: repeat_interval_ms.to_string(),
+            press_duration_ms: press_duration_ms.to_string(),
+            linked_interval_ms: "80".to_string(),
+            linked_press_duration_ms: "1".to_string(),
+            capture_target: None,
+            capture_down_keys: HashSet::new(),
+        },
+        SpecialKeyConfig::AutoTrigger {
+            name,
+            key,
+            trigger_hotkey,
+            repeat_interval_ms,
+            press_duration_ms,
+        } => SpecialKeyDialogState {
+            edit_index: Some(index),
+            config_type: SpecialKeyType::AutoTrigger,
+            name: name.clone(),
+            custom_key: "未录入".to_string(),
+            auto_trigger_key: key.clone(),
+            auto_trigger_hotkey: display_hotkey_text(trigger_hotkey),
+            linked_trigger_key: "未录入".to_string(),
+            linked_target_key: "未录入".to_string(),
+            repeat_interval_ms: repeat_interval_ms.to_string(),
+            press_duration_ms: press_duration_ms.to_string(),
+            linked_interval_ms: "80".to_string(),
+            linked_press_duration_ms: "1".to_string(),
+            capture_target: None,
+            capture_down_keys: HashSet::new(),
+        },
+        SpecialKeyConfig::LinkedKey {
+            name,
+            trigger_key,
+            linked_key,
+            interval_ms,
+            press_duration_ms,
+        } => SpecialKeyDialogState {
+            edit_index: Some(index),
+            config_type: SpecialKeyType::LinkedKey,
+            name: name.clone(),
+            custom_key: "未录入".to_string(),
+            auto_trigger_key: "未录入".to_string(),
+            auto_trigger_hotkey: "未录入".to_string(),
+            linked_trigger_key: trigger_key.clone(),
+            linked_target_key: linked_key.clone(),
+            repeat_interval_ms: "80".to_string(),
+            press_duration_ms: "1".to_string(),
+            linked_interval_ms: interval_ms.to_string(),
+            linked_press_duration_ms: press_duration_ms.to_string(),
+            capture_target: None,
+            capture_down_keys: HashSet::new(),
+        },
+    }
+}
+
 fn start_combo_capture(dialog: &mut ComboDialogState, target: ComboCaptureTarget) {
+    dialog.capture_target = Some(target);
+    dialog.capture_down_keys = currently_pressed_supported_keys();
+}
+
+fn start_special_key_capture(dialog: &mut SpecialKeyDialogState, target: SpecialKeyCaptureTarget) {
     dialog.capture_target = Some(target);
     dialog.capture_down_keys = currently_pressed_supported_keys();
 }
@@ -2787,6 +3639,77 @@ fn combo_capture_message(target: Option<ComboCaptureTarget>) -> Option<&'static 
             Some("正在重新录入步骤按键，请按下一个有效按键。")
         }
         None => None,
+    }
+}
+
+fn special_key_capture_message(target: Option<SpecialKeyCaptureTarget>) -> Option<&'static str> {
+    match target {
+        Some(SpecialKeyCaptureTarget::CustomKey) => {
+            Some("正在录入独立连发键位，请按下一个有效按键。")
+        }
+        Some(SpecialKeyCaptureTarget::AutoTriggerKey) => {
+            Some("正在录入自动触发键位，请按下一个有效按键。")
+        }
+        Some(SpecialKeyCaptureTarget::AutoTriggerHotkey) => {
+            Some("正在录入自动触发热键，请先按修饰键，再按一次主键即可完成录入。")
+        }
+        Some(SpecialKeyCaptureTarget::LinkedTriggerKey) => {
+            Some("正在录入连携触发键，请按下一个有效按键。")
+        }
+        Some(SpecialKeyCaptureTarget::LinkedTargetKey) => {
+            Some("正在录入连携键，请按下一个有效按键。")
+        }
+        None => None,
+    }
+}
+
+fn special_key_kind_label(config: &SpecialKeyConfig) -> &'static str {
+    match config {
+        SpecialKeyConfig::CustomAutofire { .. } => "独立连发",
+        SpecialKeyConfig::AutoTrigger { .. } => "自动触发",
+        SpecialKeyConfig::LinkedKey { .. } => "连携键位",
+    }
+}
+
+fn special_key_summary(config: &SpecialKeyConfig) -> String {
+    match config {
+        SpecialKeyConfig::CustomAutofire {
+            key,
+            repeat_interval_ms,
+            press_duration_ms,
+            ..
+        } => format!(
+            "{} / {}ms / {}ms",
+            display_key_name(key),
+            repeat_interval_ms,
+            press_duration_ms
+        ),
+        SpecialKeyConfig::AutoTrigger {
+            key,
+            trigger_hotkey,
+            repeat_interval_ms,
+            press_duration_ms,
+            ..
+        } => format!(
+            "{} <= {} / {}ms / {}ms",
+            display_key_name(key),
+            display_hotkey_text(trigger_hotkey),
+            repeat_interval_ms,
+            press_duration_ms
+        ),
+        SpecialKeyConfig::LinkedKey {
+            trigger_key,
+            linked_key,
+            interval_ms,
+            press_duration_ms,
+            ..
+        } => format!(
+            "{} -> {} / {}ms / {}ms",
+            display_key_name(trigger_key),
+            display_key_name(linked_key),
+            interval_ms,
+            press_duration_ms
+        ),
     }
 }
 
@@ -2833,8 +3756,11 @@ fn parse_dialog_ms(raw: &str, label: &str) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppState, ComboCaptureTarget, ComboDialogState, ComboStepDraft};
-    use crate::config::ConfigStore;
+    use super::{
+        AppState, ComboCaptureTarget, ComboDialogState, ComboStepDraft, SpecialKeyDialogState,
+        SpecialKeyType,
+    };
+    use crate::config::{ConfigStore, SpecialKeyConfig};
     use std::collections::HashSet;
     use std::fs;
     use std::path::PathBuf;
@@ -2889,6 +3815,55 @@ mod tests {
     }
 
     #[test]
+    fn save_special_key_dialog_persists_to_config_file() {
+        let path = unique_test_config_path();
+        let mut state = AppState::new(path.clone(), ConfigStore::default());
+        state.setup_initial_state().expect("setup initial state");
+
+        let dialog = SpecialKeyDialogState {
+            edit_index: None,
+            config_type: SpecialKeyType::AutoTrigger,
+            name: "auto-j".to_string(),
+            custom_key: "未录入".to_string(),
+            auto_trigger_key: "J".to_string(),
+            auto_trigger_hotkey: "LAlt+Q".to_string(),
+            linked_trigger_key: "未录入".to_string(),
+            linked_target_key: "未录入".to_string(),
+            repeat_interval_ms: "30".to_string(),
+            press_duration_ms: "2".to_string(),
+            linked_interval_ms: "80".to_string(),
+            linked_press_duration_ms: "1".to_string(),
+            capture_target: None,
+            capture_down_keys: HashSet::new(),
+        };
+
+        state
+            .save_special_key_dialog(&dialog)
+            .expect("save special key dialog should persist");
+
+        let saved = ConfigStore::load_or_create(&path).expect("load saved config");
+        let special = &saved.profiles["default"].special_keys[0];
+        match special {
+            SpecialKeyConfig::AutoTrigger {
+                name,
+                key,
+                trigger_hotkey,
+                repeat_interval_ms,
+                press_duration_ms,
+            } => {
+                assert_eq!(name, "auto-j");
+                assert_eq!(key, "J");
+                assert_eq!(trigger_hotkey, "LALT+Q");
+                assert_eq!(*repeat_interval_ms, 30);
+                assert_eq!(*press_duration_ms, 2);
+            }
+            _ => panic!("expected auto trigger special key"),
+        }
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn remember_last_started_profile_updates_default_for_saved_selection() {
         let path = unique_test_config_path();
         let mut state = AppState::new(path.clone(), ConfigStore::default());
@@ -2932,6 +3907,60 @@ mod tests {
 
         let saved = ConfigStore::load_or_create(&path).expect("load saved config");
         assert_eq!(saved.default_profile, "default");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn quick_switch_watch_config_uses_global_hotkey_and_current_target_windows() {
+        let path = unique_test_config_path();
+        let mut state = AppState::new(path.clone(), ConfigStore::default());
+        state.setup_initial_state().expect("setup initial state");
+
+        state.global_quick_switch_hotkey = "LAlt+Q".to_string();
+        state.global_target_windows_text = "DNF\r\n地下城与勇士".to_string();
+
+        let watch = state.quick_switch_watch_config();
+        let hotkey = watch.hotkey.expect("hotkey should be registerable");
+
+        assert_eq!(hotkey.modifiers, 0x0001);
+        assert_eq!(hotkey.vk, 0x51);
+        assert_eq!(watch.target_windows, vec!["DNF", "地下城与勇士"]);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn persist_global_quick_switch_hotkey_saves_immediately() {
+        let path = unique_test_config_path();
+        let mut state = AppState::new(path.clone(), ConfigStore::default());
+        state.setup_initial_state().expect("setup initial state");
+
+        state.global_quick_switch_hotkey = "LAlt+;".to_string();
+        state
+            .persist_global_quick_switch_hotkey()
+            .expect("global quick switch hotkey should persist");
+
+        let saved = ConfigStore::load_or_create(&path).expect("load saved config");
+        assert_eq!(saved.quick_switch_hotkey, "LALT+SEMICOLON");
+        assert_eq!(state.global_quick_switch_hotkey, "LAlt+;");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn persist_global_target_windows_saves_immediately() {
+        let path = unique_test_config_path();
+        let mut state = AppState::new(path.clone(), ConfigStore::default());
+        state.setup_initial_state().expect("setup initial state");
+
+        state.global_target_windows_text = "地下城与勇士\r\nDNF".to_string();
+        state
+            .persist_global_target_windows()
+            .expect("global target windows should persist");
+
+        let saved = ConfigStore::load_or_create(&path).expect("load saved config");
+        assert_eq!(saved.target_windows, vec!["地下城与勇士", "DNF"]);
 
         let _ = fs::remove_file(path);
     }

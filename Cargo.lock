@@ -568,12 +568,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "dnf"
+name = "dnf_auto_fire"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "eframe",
+ "image",
  "raw-window-handle",
  "serde",
  "serde_json",

@@ -1,4 +1,4 @@
-use crate::keymap::{normalize_hotkey_text, parse_hotkey};
+use crate::keymap::normalize_hotkey_text;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -6,7 +6,7 @@ use std::fs;
 use std::path::Path;
 
 const DEFAULT_PROFILE_NAME: &str = "default";
-const DEFAULT_KEYS: [&str; 4] = ["J", "P", "L", "H"];
+const DEFAULT_KEYS: [&str; 1] = ["J"];
 const DEFAULT_TARGET_WINDOWS: [&str; 2] = ["地下城与勇士", "DNF"];
 const DEFAULT_QUICK_SWITCH_HOTKEY: &str = "LCTRL+BACKQUOTE";
 
@@ -108,16 +108,158 @@ impl ComboConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SpecialKeyConfig {
+    CustomAutofire {
+        name: String,
+        key: String,
+        repeat_interval_ms: u64,
+        press_duration_ms: u64,
+    },
+    AutoTrigger {
+        name: String,
+        key: String,
+        trigger_hotkey: String,
+        repeat_interval_ms: u64,
+        press_duration_ms: u64,
+    },
+    LinkedKey {
+        name: String,
+        trigger_key: String,
+        linked_key: String,
+        interval_ms: u64,
+        press_duration_ms: u64,
+    },
+}
+
+impl SpecialKeyConfig {
+    pub fn normalized(self) -> Self {
+        match self {
+            Self::CustomAutofire {
+                name,
+                key,
+                repeat_interval_ms,
+                press_duration_ms,
+            } => Self::CustomAutofire {
+                name: name.trim().to_string(),
+                key: key.trim().to_ascii_uppercase(),
+                repeat_interval_ms: repeat_interval_ms.max(1),
+                press_duration_ms: press_duration_ms.max(1),
+            },
+            Self::AutoTrigger {
+                name,
+                key,
+                trigger_hotkey,
+                repeat_interval_ms,
+                press_duration_ms,
+            } => Self::AutoTrigger {
+                name: name.trim().to_string(),
+                key: key.trim().to_ascii_uppercase(),
+                trigger_hotkey: normalize_special_hotkey_text(&trigger_hotkey),
+                repeat_interval_ms: repeat_interval_ms.max(1),
+                press_duration_ms: press_duration_ms.max(1),
+            },
+            Self::LinkedKey {
+                name,
+                trigger_key,
+                linked_key,
+                interval_ms,
+                press_duration_ms,
+            } => Self::LinkedKey {
+                name: name.trim().to_string(),
+                trigger_key: trigger_key.trim().to_ascii_uppercase(),
+                linked_key: linked_key.trim().to_ascii_uppercase(),
+                interval_ms: interval_ms.max(1),
+                press_duration_ms: press_duration_ms.max(1),
+            },
+        }
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::CustomAutofire {
+                name,
+                key,
+                repeat_interval_ms,
+                press_duration_ms,
+            } => {
+                ensure_special_name(name)?;
+                if key.trim().is_empty() {
+                    bail!("custom autofire key cannot be empty");
+                }
+                if *repeat_interval_ms == 0 {
+                    bail!("custom autofire repeat_interval_ms must be >= 1");
+                }
+                if *press_duration_ms == 0 {
+                    bail!("custom autofire press_duration_ms must be >= 1");
+                }
+            }
+            Self::AutoTrigger {
+                name,
+                key,
+                trigger_hotkey,
+                repeat_interval_ms,
+                press_duration_ms,
+            } => {
+                ensure_special_name(name)?;
+                if key.trim().is_empty() {
+                    bail!("auto trigger key cannot be empty");
+                }
+                if trigger_hotkey.trim().is_empty() {
+                    bail!("auto trigger trigger_hotkey cannot be empty");
+                }
+                if *repeat_interval_ms == 0 {
+                    bail!("auto trigger repeat_interval_ms must be >= 1");
+                }
+                if *press_duration_ms == 0 {
+                    bail!("auto trigger press_duration_ms must be >= 1");
+                }
+            }
+            Self::LinkedKey {
+                name,
+                trigger_key,
+                linked_key,
+                interval_ms,
+                press_duration_ms,
+            } => {
+                ensure_special_name(name)?;
+                if trigger_key.trim().is_empty() {
+                    bail!("linked key trigger_key cannot be empty");
+                }
+                if linked_key.trim().is_empty() {
+                    bail!("linked key linked_key cannot be empty");
+                }
+                if *interval_ms == 0 {
+                    bail!("linked key interval_ms must be >= 1");
+                }
+                if *press_duration_ms == 0 {
+                    bail!("linked key press_duration_ms must be >= 1");
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            Self::CustomAutofire { name, .. }
+            | Self::AutoTrigger { name, .. }
+            | Self::LinkedKey { name, .. } => name,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Profile {
     pub enabled_keys: Vec<String>,
     pub repeat_interval_ms: u64,
     pub press_duration_ms: u64,
     pub poll_interval_ms: u64,
-    pub target_windows: Vec<String>,
-    #[serde(default = "default_quick_switch_hotkey")]
-    pub quick_switch_hotkey: String,
     #[serde(default)]
     pub combos: Vec<ComboConfig>,
+    #[serde(default)]
+    pub special_keys: Vec<SpecialKeyConfig>,
 }
 
 impl Default for Profile {
@@ -127,12 +269,8 @@ impl Default for Profile {
             repeat_interval_ms: 1,
             press_duration_ms: 1,
             poll_interval_ms: 1,
-            target_windows: DEFAULT_TARGET_WINDOWS
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect(),
-            quick_switch_hotkey: DEFAULT_QUICK_SWITCH_HOTKEY.to_string(),
             combos: Vec::new(),
+            special_keys: Vec::new(),
         }
     }
 }
@@ -140,24 +278,20 @@ impl Default for Profile {
 impl Profile {
     pub fn normalized(mut self) -> Self {
         self.enabled_keys = normalize_tokens(&self.enabled_keys, true);
-        self.target_windows = normalize_tokens(&self.target_windows, false);
         self.combos = self
             .combos
             .into_iter()
             .map(ComboConfig::normalized)
             .collect();
+        self.special_keys = self
+            .special_keys
+            .into_iter()
+            .map(SpecialKeyConfig::normalized)
+            .collect();
 
-        if self.enabled_keys.is_empty() && self.combos.is_empty() {
+        if self.enabled_keys.is_empty() && self.combos.is_empty() && self.special_keys.is_empty() {
             self.enabled_keys = DEFAULT_KEYS.iter().map(|s| (*s).to_string()).collect();
         }
-        if self.target_windows.is_empty() {
-            self.target_windows = DEFAULT_TARGET_WINDOWS
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect();
-        }
-        self.quick_switch_hotkey = normalize_hotkey_text_if_valid(&self.quick_switch_hotkey)
-            .unwrap_or_else(default_quick_switch_hotkey);
 
         if self.repeat_interval_ms == 0 {
             self.repeat_interval_ms = 1;
@@ -173,13 +307,9 @@ impl Profile {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.enabled_keys.is_empty() && self.combos.is_empty() {
-            bail!("enabled_keys and combos cannot both be empty");
+        if self.enabled_keys.is_empty() && self.combos.is_empty() && self.special_keys.is_empty() {
+            bail!("enabled_keys, combos, and special_keys cannot all be empty");
         }
-        if self.target_windows.is_empty() {
-            bail!("target_windows cannot be empty");
-        }
-        parse_hotkey(&self.quick_switch_hotkey)?;
         if self.repeat_interval_ms == 0 {
             bail!("repeat_interval_ms must be >= 1");
         }
@@ -190,8 +320,12 @@ impl Profile {
             bail!("poll_interval_ms must be >= 1");
         }
         ensure_unique_combo_names(&self.combos)?;
+        ensure_unique_special_key_names(&self.special_keys)?;
         for combo in &self.combos {
             combo.validate()?;
+        }
+        for special in &self.special_keys {
+            special.validate()?;
         }
 
         Ok(())
@@ -201,6 +335,10 @@ impl Profile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigStore {
     pub default_profile: String,
+    #[serde(default = "default_quick_switch_hotkey")]
+    pub quick_switch_hotkey: String,
+    #[serde(default = "default_target_windows")]
+    pub target_windows: Vec<String>,
     pub profiles: BTreeMap<String, Profile>,
 }
 
@@ -210,6 +348,8 @@ impl Default for ConfigStore {
         profiles.insert(DEFAULT_PROFILE_NAME.to_string(), Profile::default());
         Self {
             default_profile: DEFAULT_PROFILE_NAME.to_string(),
+            quick_switch_hotkey: DEFAULT_QUICK_SWITCH_HOTKEY.to_string(),
+            target_windows: default_target_windows(),
             profiles,
         }
     }
@@ -300,6 +440,12 @@ impl ConfigStore {
         for profile in self.profiles.values_mut() {
             *profile = profile.clone().normalized();
         }
+        self.quick_switch_hotkey = normalize_hotkey_text_if_valid(&self.quick_switch_hotkey)
+            .unwrap_or_else(default_quick_switch_hotkey);
+        self.target_windows = normalize_tokens(&self.target_windows, false);
+        if self.target_windows.is_empty() {
+            self.target_windows = default_target_windows();
+        }
 
         if !self.profiles.contains_key(&self.default_profile) {
             self.default_profile = self
@@ -316,6 +462,13 @@ impl ConfigStore {
 
 fn default_quick_switch_hotkey() -> String {
     DEFAULT_QUICK_SWITCH_HOTKEY.to_string()
+}
+
+fn default_target_windows() -> Vec<String> {
+    DEFAULT_TARGET_WINDOWS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
 }
 
 fn normalize_hotkey_text_if_valid(raw: &str) -> Option<String> {
@@ -360,6 +513,23 @@ fn ensure_unique_combo_names(combos: &[ComboConfig]) -> Result<()> {
     Ok(())
 }
 
+fn ensure_unique_special_key_names(special_keys: &[SpecialKeyConfig]) -> Result<()> {
+    let mut seen = HashSet::new();
+    for special in special_keys {
+        if !seen.insert(special.name().to_ascii_lowercase()) {
+            bail!("duplicate special key config name: {}", special.name());
+        }
+    }
+    Ok(())
+}
+
+fn ensure_special_name(name: &str) -> Result<()> {
+    if name.trim().is_empty() {
+        bail!("special key config name cannot be empty");
+    }
+    Ok(())
+}
+
 fn is_zero(value: &u64) -> bool {
     *value == 0
 }
@@ -378,9 +548,17 @@ fn normalize_key_sequence(tokens: &[String]) -> Vec<String> {
         .collect()
 }
 
+fn normalize_special_hotkey_text(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    normalize_hotkey_text(trimmed).unwrap_or_else(|_| trimmed.to_ascii_uppercase())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ComboConfig, ComboStepConfig, ConfigStore, Profile};
+    use super::{ComboConfig, ComboStepConfig, ConfigStore, Profile, SpecialKeyConfig};
 
     #[test]
     fn profile_normalize_adds_defaults_for_empty_fields() {
@@ -389,15 +567,12 @@ mod tests {
             repeat_interval_ms: 0,
             press_duration_ms: 0,
             poll_interval_ms: 0,
-            target_windows: Vec::new(),
-            quick_switch_hotkey: String::new(),
             combos: Vec::new(),
+            special_keys: Vec::new(),
         }
         .normalized();
 
         assert!(!profile.enabled_keys.is_empty());
-        assert!(!profile.target_windows.is_empty());
-        assert_eq!(profile.quick_switch_hotkey, "LCTRL+BACKQUOTE");
         assert_eq!(profile.repeat_interval_ms, 1);
         assert_eq!(profile.press_duration_ms, 1);
         assert_eq!(profile.poll_interval_ms, 1);
@@ -485,9 +660,8 @@ mod tests {
                 repeat_interval_ms: 1,
                 press_duration_ms: 1,
                 poll_interval_ms: 1,
-                target_windows: vec!["DNF".to_string()],
-                quick_switch_hotkey: "LCTRL+Q".to_string(),
                 combos: Vec::new(),
+                special_keys: Vec::new(),
             },
         );
 
@@ -505,8 +679,6 @@ mod tests {
             repeat_interval_ms: 1,
             press_duration_ms: 1,
             poll_interval_ms: 1,
-            target_windows: vec!["DNF".to_string()],
-            quick_switch_hotkey: "LCTRL+Q".to_string(),
             combos: vec![
                 ComboConfig {
                     name: "combo".to_string(),
@@ -533,6 +705,7 @@ mod tests {
                     press_duration_ms: 1,
                 },
             ],
+            special_keys: Vec::new(),
         };
 
         assert!(profile.validate().is_err());
@@ -542,13 +715,14 @@ mod tests {
     fn store_normalized_migrates_legacy_combo_json() {
         let raw = r#"{
           "default_profile": "default",
+          "quick_switch_hotkey": "LALT+Q",
+          "target_windows": ["DNF"],
           "profiles": {
             "default": {
               "enabled_keys": ["J"],
               "repeat_interval_ms": 1,
               "press_duration_ms": 1,
               "poll_interval_ms": 1,
-              "target_windows": ["DNF"],
               "combos": [
                 {
                   "name": "legacy",
@@ -557,7 +731,8 @@ mod tests {
                   "step_interval_ms": 80,
                   "press_duration_ms": 1
                 }
-              ]
+              ],
+              "special_keys": []
             }
           }
         }"#;
@@ -575,5 +750,92 @@ mod tests {
         assert_eq!(combo.steps[0].press_duration_ms, 1);
         assert!(combo.sequence_keys.is_empty());
         assert_eq!(combo.step_interval_ms, 0);
+        assert_eq!(normalized.quick_switch_hotkey, "LALT+Q");
+        assert_eq!(normalized.target_windows, vec!["DNF"]);
+    }
+
+    #[test]
+    fn special_key_configs_are_normalized_and_validated() {
+        let profile = Profile {
+            enabled_keys: Vec::new(),
+            repeat_interval_ms: 1,
+            press_duration_ms: 1,
+            poll_interval_ms: 1,
+            combos: Vec::new(),
+            special_keys: vec![
+                SpecialKeyConfig::CustomAutofire {
+                    name: "  custom ".to_string(),
+                    key: "j".to_string(),
+                    repeat_interval_ms: 0,
+                    press_duration_ms: 0,
+                },
+                SpecialKeyConfig::AutoTrigger {
+                    name: "auto".to_string(),
+                    key: "k".to_string(),
+                    trigger_hotkey: "lalt+~".to_string(),
+                    repeat_interval_ms: 0,
+                    press_duration_ms: 0,
+                },
+                SpecialKeyConfig::LinkedKey {
+                    name: "link".to_string(),
+                    trigger_key: "a".to_string(),
+                    linked_key: "b".to_string(),
+                    interval_ms: 0,
+                    press_duration_ms: 0,
+                },
+            ],
+        }
+        .normalized();
+
+        assert_eq!(profile.special_keys.len(), 3);
+        match &profile.special_keys[0] {
+            SpecialKeyConfig::CustomAutofire {
+                name,
+                key,
+                repeat_interval_ms,
+                press_duration_ms,
+            } => {
+                assert_eq!(name, "custom");
+                assert_eq!(key, "J");
+                assert_eq!(*repeat_interval_ms, 1);
+                assert_eq!(*press_duration_ms, 1);
+            }
+            _ => panic!("expected custom autofire"),
+        }
+        match &profile.special_keys[1] {
+            SpecialKeyConfig::AutoTrigger { trigger_hotkey, .. } => {
+                assert_eq!(trigger_hotkey, "LALT+BACKQUOTE");
+            }
+            _ => panic!("expected auto trigger"),
+        }
+        assert!(profile.validate().is_ok());
+    }
+
+    #[test]
+    fn duplicate_special_key_names_are_rejected() {
+        let profile = Profile {
+            enabled_keys: Vec::new(),
+            repeat_interval_ms: 1,
+            press_duration_ms: 1,
+            poll_interval_ms: 1,
+            combos: Vec::new(),
+            special_keys: vec![
+                SpecialKeyConfig::LinkedKey {
+                    name: "special".to_string(),
+                    trigger_key: "A".to_string(),
+                    linked_key: "B".to_string(),
+                    interval_ms: 1,
+                    press_duration_ms: 1,
+                },
+                SpecialKeyConfig::CustomAutofire {
+                    name: "SPECIAL".to_string(),
+                    key: "J".to_string(),
+                    repeat_interval_ms: 1,
+                    press_duration_ms: 1,
+                },
+            ],
+        };
+
+        assert!(profile.validate().is_err());
     }
 }

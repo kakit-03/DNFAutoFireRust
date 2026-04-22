@@ -1,4 +1,4 @@
-use crate::config::{ComboConfig, Profile};
+use crate::config::{ComboConfig, Profile, SpecialKeyConfig};
 use anyhow::{Result, bail};
 use std::collections::HashSet;
 
@@ -9,9 +9,8 @@ pub struct ProfileDraft {
     pub repeat_interval_ms: String,
     pub press_duration_ms: String,
     pub poll_interval_ms: String,
-    pub target_windows_text: String,
-    pub quick_switch_hotkey: String,
     pub combos: Vec<ComboConfig>,
+    pub special_keys: Vec<SpecialKeyConfig>,
 }
 
 impl ProfileDraft {
@@ -22,9 +21,8 @@ impl ProfileDraft {
             repeat_interval_ms: profile.repeat_interval_ms.to_string(),
             press_duration_ms: profile.press_duration_ms.to_string(),
             poll_interval_ms: profile.poll_interval_ms.to_string(),
-            target_windows_text: target_windows_to_text(&profile.target_windows),
-            quick_switch_hotkey: profile.quick_switch_hotkey.clone(),
             combos: profile.combos.clone(),
+            special_keys: profile.special_keys.clone(),
         }
     }
 
@@ -37,16 +35,14 @@ impl ProfileDraft {
         let repeat_interval_ms = parse_ms(&self.repeat_interval_ms, "连发间隔")?;
         let press_duration_ms = parse_ms(&self.press_duration_ms, "按下时长")?;
         let poll_interval_ms = parse_ms(&self.poll_interval_ms, "轮询间隔")?;
-        let target_windows = target_windows_from_text(&self.target_windows_text);
 
         let profile = Profile {
             enabled_keys: self.enabled_keys.clone(),
             repeat_interval_ms,
             press_duration_ms,
             poll_interval_ms,
-            target_windows,
-            quick_switch_hotkey: self.quick_switch_hotkey.trim().to_string(),
             combos: self.combos.clone(),
+            special_keys: self.special_keys.clone(),
         }
         .normalized();
 
@@ -92,7 +88,7 @@ fn parse_ms(raw: &str, label: &str) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::{ProfileDraft, target_windows_from_text, target_windows_to_text};
-    use crate::config::{ComboConfig, ComboStepConfig, Profile};
+    use crate::config::{ComboConfig, ComboStepConfig, Profile, SpecialKeyConfig};
 
     #[test]
     fn draft_roundtrip_keeps_all_profile_fields() {
@@ -101,8 +97,6 @@ mod tests {
             repeat_interval_ms: 5,
             press_duration_ms: 3,
             poll_interval_ms: 2,
-            target_windows: vec!["地下城与勇士".to_string(), "DNF".to_string()],
-            quick_switch_hotkey: "LCTRL+LSHIFT+Q".to_string(),
             combos: vec![ComboConfig {
                 name: "combo1".to_string(),
                 trigger_key: "U".to_string(),
@@ -127,6 +121,13 @@ mod tests {
                 step_interval_ms: 0,
                 press_duration_ms: 1,
             }],
+            special_keys: vec![SpecialKeyConfig::LinkedKey {
+                name: "follow".to_string(),
+                trigger_key: "A".to_string(),
+                linked_key: "B".to_string(),
+                interval_ms: 50,
+                press_duration_ms: 2,
+            }],
         };
 
         let draft = ProfileDraft::from_named_profile("raid", &profile);
@@ -137,13 +138,12 @@ mod tests {
         assert_eq!(restored.repeat_interval_ms, profile.repeat_interval_ms);
         assert_eq!(restored.press_duration_ms, profile.press_duration_ms);
         assert_eq!(restored.poll_interval_ms, profile.poll_interval_ms);
-        assert_eq!(restored.target_windows, profile.target_windows);
-        assert_eq!(restored.quick_switch_hotkey, profile.quick_switch_hotkey);
         assert_eq!(restored.combos.len(), 1);
         assert_eq!(restored.combos[0].steps.len(), 3);
         assert_eq!(restored.combos[0].steps[0].key, "A");
         assert_eq!(restored.combos[0].steps[1].interval_ms, 90);
         assert_eq!(restored.combos[0].steps[2].press_duration_ms, 3);
+        assert_eq!(restored.special_keys.len(), 1);
     }
 
     #[test]
@@ -162,8 +162,6 @@ mod tests {
             repeat_interval_ms: "1".to_string(),
             press_duration_ms: "1".to_string(),
             poll_interval_ms: "1".to_string(),
-            target_windows_text: "DNF".to_string(),
-            quick_switch_hotkey: "LCTRL+Q".to_string(),
             combos: vec![ComboConfig {
                 name: "burst".to_string(),
                 trigger_key: "U".to_string(),
@@ -188,6 +186,7 @@ mod tests {
                 step_interval_ms: 0,
                 press_duration_ms: 1,
             }],
+            special_keys: Vec::new(),
         };
 
         let (_, profile) = draft.to_named_profile().expect("draft -> profile");

@@ -1,12 +1,18 @@
 use anyhow::{Result, bail};
 use std::collections::HashSet;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeySpec {
     pub name: &'static str,
     pub vk: u16,
     pub scan: u8,
     pub extended: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HotkeyRegistration {
+    pub modifiers: u32,
+    pub vk: u32,
 }
 
 macro_rules! define_supported_keys {
@@ -227,6 +233,101 @@ pub fn normalize_hotkey_text(input: &str) -> Result<String> {
     .join("+"))
 }
 
+pub fn display_key_name(name: &str) -> String {
+    let normalized = normalize_key_name(name);
+    match normalized.as_str() {
+        "ESC" => "Esc".to_string(),
+        "TAB" => "Tab".to_string(),
+        "BACKSPACE" => "Bksp".to_string(),
+        "CAPSLOCK" => "Caps".to_string(),
+        "ENTER" => "Enter".to_string(),
+        "SPACE" => "Space".to_string(),
+        "LCTRL" => "LCtrl".to_string(),
+        "RCTRL" => "RCtrl".to_string(),
+        "LSHIFT" => "LShift".to_string(),
+        "RSHIFT" => "RShift".to_string(),
+        "LALT" => "LAlt".to_string(),
+        "RALT" => "RAlt".to_string(),
+        "LWIN" => "LWin".to_string(),
+        "RWIN" => "RWin".to_string(),
+        "INSERT" => "Ins".to_string(),
+        "DELETE" => "Del".to_string(),
+        "PAGEUP" => "PgUp".to_string(),
+        "PAGEDOWN" => "PgDn".to_string(),
+        "BACKQUOTE" => "~".to_string(),
+        "MINUS" => "-".to_string(),
+        "EQUAL" => "=".to_string(),
+        "LBRACKET" => "[".to_string(),
+        "RBRACKET" => "]".to_string(),
+        "BACKSLASH" => "\\".to_string(),
+        "SEMICOLON" => ";".to_string(),
+        "APOSTROPHE" => "'".to_string(),
+        "COMMA" => ",".to_string(),
+        "PERIOD" => ".".to_string(),
+        "SLASH" => "/".to_string(),
+        "NUMLOCK" => "Num".to_string(),
+        "NUMDIV" => "Num/".to_string(),
+        "NUMMUL" => "Num*".to_string(),
+        "NUMMINUS" => "Num-".to_string(),
+        "NUMPLUS" => "Num+".to_string(),
+        "NUMENTER" => "NumEnter".to_string(),
+        "NUMDOT" => "Num.".to_string(),
+        _ => normalized,
+    }
+}
+
+pub fn display_hotkey_text(input: &str) -> String {
+    input
+        .split('+')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(display_key_name)
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+pub fn display_hotkey_names<I>(names: I) -> String
+where
+    I: IntoIterator<Item = String>,
+{
+    names
+        .into_iter()
+        .map(|name| display_key_name(&name))
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+pub fn hotkey_registration(input: &str) -> Result<HotkeyRegistration> {
+    let specs = parse_hotkey(input)?;
+    hotkey_registration_from_specs(&specs)
+}
+
+pub fn hotkey_registration_from_specs(specs: &[KeySpec]) -> Result<HotkeyRegistration> {
+    let mut modifiers = 0u32;
+    let mut main_key = None;
+
+    for spec in specs {
+        match spec.name {
+            "LALT" | "RALT" => modifiers |= 0x0001,
+            "LCTRL" | "RCTRL" => modifiers |= 0x0002,
+            "LSHIFT" | "RSHIFT" => modifiers |= 0x0004,
+            "LWIN" | "RWIN" => modifiers |= 0x0008,
+            "MENU" => bail!("quick_switch_hotkey does not support MENU as a modifier"),
+            _ => {
+                if main_key.replace(spec.vk as u32).is_some() {
+                    bail!("quick_switch_hotkey must contain exactly one non-modifier key");
+                }
+            }
+        }
+    }
+
+    let Some(vk) = main_key else {
+        bail!("quick_switch_hotkey must include one non-modifier key");
+    };
+
+    Ok(HotkeyRegistration { modifiers, vk })
+}
+
 pub fn sort_hotkey_names<I>(names: I) -> Vec<String>
 where
     I: IntoIterator<Item = String>,
@@ -274,7 +375,7 @@ fn normalize_key_name(name: &str) -> String {
         "PGUP" => "PAGEUP".to_string(),
         "PGDN" => "PAGEDOWN".to_string(),
         "BKSP" | "BS" | "BACK" => "BACKSPACE".to_string(),
-        "BACKTICK" | "GRAVE" | "GRAVEACCENT" | "OEM3" => "BACKQUOTE".to_string(),
+        "BACKTICK" | "GRAVE" | "GRAVEACCENT" | "OEM3" | "TILDE" => "BACKQUOTE".to_string(),
         "OEM_MINUS" => "MINUS".to_string(),
         "OEM_PLUS" => "EQUAL".to_string(),
         "OEM_4" => "LBRACKET".to_string(),
@@ -290,7 +391,7 @@ fn normalize_key_name(name: &str) -> String {
         "NUM-" => "NUMMINUS".to_string(),
         "NUM+" => "NUMPLUS".to_string(),
         "NUM." => "NUMDOT".to_string(),
-        "`" => "BACKQUOTE".to_string(),
+        "`" | "~" => "BACKQUOTE".to_string(),
         "-" => "MINUS".to_string(),
         "=" => "EQUAL".to_string(),
         "[" => "LBRACKET".to_string(),
@@ -332,8 +433,8 @@ fn hotkey_order(name: &str) -> (u8, usize) {
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_hotkey_text, parse_hotkey, parse_key_sequence, parse_key_specs, parse_single_key,
-        sort_hotkey_names,
+        display_hotkey_text, display_key_name, hotkey_registration, normalize_hotkey_text,
+        parse_hotkey, parse_key_sequence, parse_key_specs, parse_single_key, sort_hotkey_names,
     };
 
     #[test]
@@ -349,6 +450,7 @@ mod tests {
     #[test]
     fn parse_key_specs_supports_punctuation_and_navigation_aliases() {
         assert_eq!(parse_single_key("`").expect("`").name, "BACKQUOTE");
+        assert_eq!(parse_single_key("~").expect("~").name, "BACKQUOTE");
         assert_eq!(parse_single_key("[").expect("[").name, "LBRACKET");
         assert_eq!(parse_single_key("pgup").expect("pgup").name, "PAGEUP");
         assert_eq!(parse_single_key("del").expect("del").name, "DELETE");
@@ -427,5 +529,46 @@ mod tests {
             "LCTRL".to_string(),
         ]);
         assert_eq!(sorted, vec!["LCTRL", "LSHIFT", "Q"]);
+    }
+
+    #[test]
+    fn hotkey_registration_supports_alt_combo() {
+        let hotkey = hotkey_registration("alt+q").expect("registerable hotkey");
+        assert_eq!(hotkey.modifiers, 0x0001);
+        assert_eq!(hotkey.vk, 0x51);
+    }
+
+    #[test]
+    fn hotkey_registration_supports_alt_tilde_alias() {
+        let hotkey = hotkey_registration("alt+~").expect("registerable alt tilde hotkey");
+        assert_eq!(hotkey.modifiers, 0x0001);
+        assert_eq!(hotkey.vk, 0xC0);
+    }
+
+    #[test]
+    fn hotkey_registration_rejects_multiple_main_keys() {
+        assert!(hotkey_registration("ctrl+a+s").is_err());
+    }
+
+    #[test]
+    fn display_key_name_uses_symbolic_labels_for_punctuation() {
+        assert_eq!(display_key_name("BACKQUOTE"), "~");
+        assert_eq!(display_key_name("MINUS"), "-");
+        assert_eq!(display_key_name("EQUAL"), "=");
+        assert_eq!(display_key_name("LBRACKET"), "[");
+        assert_eq!(display_key_name("RBRACKET"), "]");
+        assert_eq!(display_key_name("BACKSLASH"), "\\");
+        assert_eq!(display_key_name("SEMICOLON"), ";");
+        assert_eq!(display_key_name("APOSTROPHE"), "'");
+        assert_eq!(display_key_name("COMMA"), ",");
+        assert_eq!(display_key_name("PERIOD"), ".");
+        assert_eq!(display_key_name("SLASH"), "/");
+    }
+
+    #[test]
+    fn display_hotkey_text_uses_symbolic_labels() {
+        assert_eq!(display_hotkey_text("LCTRL+BACKQUOTE"), "LCtrl+~");
+        assert_eq!(display_hotkey_text("LALT+SEMICOLON"), "LAlt+;");
+        assert_eq!(display_hotkey_text("RCTRL+SLASH"), "RCtrl+/");
     }
 }

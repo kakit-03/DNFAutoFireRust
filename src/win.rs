@@ -40,6 +40,10 @@ pub fn foreground_window_ime_open() -> bool {
     }
 }
 
+pub fn foreground_window_is(target: HWND) -> bool {
+    foreground_window().is_some_and(|hwnd| hwnd == target)
+}
+
 fn foreground_window() -> Option<HWND> {
     let hwnd = unsafe { GetForegroundWindow() };
     if hwnd.0.is_null() { None } else { Some(hwnd) }

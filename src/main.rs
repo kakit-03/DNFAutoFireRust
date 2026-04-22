@@ -9,8 +9,8 @@ mod win;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use config::{ComboConfig, ComboStepConfig, ConfigStore, Profile};
-use keymap::{parse_key_specs, parse_single_key};
+use config::{ComboConfig, ComboStepConfig, ConfigStore, Profile, SpecialKeyConfig};
+use keymap::{normalize_hotkey_text, parse_hotkey, parse_key_specs, parse_single_key};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -107,7 +107,8 @@ fn run() -> Result<()> {
             store.save(&cli.config)?;
 
             println!("使用配置: {profile_name}");
-            autofire::run(&profile)
+            validate_profile_bindings(&profile, &store.quick_switch_hotkey)?;
+            autofire::run(&profile, &store.target_windows)
         }
         Command::Gui => gui::run(cli.config.clone(), store),
         Command::Config { action } => handle_config_action(&mut store, &cli.config, action),
@@ -150,37 +151,33 @@ fn handle_config_action(
             poll_interval_ms,
             windows,
         } => {
-            let target_windows = if windows.is_empty() {
-                vec!["地下城与勇士".to_string(), "DNF".to_string()]
-            } else {
-                windows
-            };
+            if !windows.is_empty() {
+                store.target_windows = windows;
+            }
 
             let existing_profile = store.get_profile(Some(&name)).ok();
             let existing_combos = existing_profile
                 .as_ref()
                 .map(|profile| profile.combos.clone())
                 .unwrap_or_default();
-            let quick_switch_hotkey = existing_profile
+            let existing_special_keys = existing_profile
                 .as_ref()
-                .map(|profile| profile.quick_switch_hotkey.clone())
-                .unwrap_or_else(|| Profile::default().quick_switch_hotkey);
-
+                .map(|profile| profile.special_keys.clone())
+                .unwrap_or_default();
             let profile = Profile {
                 enabled_keys: keys,
                 repeat_interval_ms,
                 press_duration_ms,
                 poll_interval_ms,
-                target_windows,
-                quick_switch_hotkey,
                 combos: existing_combos,
+                special_keys: existing_special_keys,
             }
             .normalized();
             profile.validate()?;
             if !profile.enabled_keys.is_empty() {
                 parse_key_specs(&profile.enabled_keys)?;
             }
-            validate_combos(&profile.combos)?;
+            validate_profile_bindings(&profile, &store.quick_switch_hotkey)?;
 
             store.upsert_profile(name.clone(), profile);
             store.save(config_path)?;
@@ -235,7 +232,7 @@ fn handle_config_action(
             profile.combos.push(combo);
             profile = profile.normalized();
             profile.validate()?;
-            validate_combos(&profile.combos)?;
+            validate_profile_bindings(&profile, &store.quick_switch_hotkey)?;
 
             store.upsert_profile(profile_name.clone(), profile);
             store.save(config_path)?;
@@ -274,12 +271,43 @@ fn handle_config_action(
     }
 }
 
-fn validate_combos(combos: &[ComboConfig]) -> Result<()> {
-    for combo in combos {
+fn validate_profile_bindings(profile: &Profile, quick_switch_hotkey: &str) -> Result<()> {
+    let normalized_quick_switch_hotkey = normalize_hotkey_text(quick_switch_hotkey)?;
+
+    for combo in &profile.combos {
         parse_single_key(&combo.trigger_key)?;
         for step in &combo.steps {
             parse_single_key(&step.key)?;
         }
     }
+
+    for special in &profile.special_keys {
+        match special {
+            SpecialKeyConfig::CustomAutofire { key, .. } => {
+                parse_single_key(key)?;
+            }
+            SpecialKeyConfig::AutoTrigger {
+                key,
+                trigger_hotkey,
+                ..
+            } => {
+                parse_single_key(key)?;
+                let normalized_trigger_hotkey = normalize_hotkey_text(trigger_hotkey)?;
+                parse_hotkey(&normalized_trigger_hotkey)?;
+                if normalized_trigger_hotkey == normalized_quick_switch_hotkey {
+                    bail!("特殊键位自动触发热键不能与全局快速切换热键冲突");
+                }
+            }
+            SpecialKeyConfig::LinkedKey {
+                trigger_key,
+                linked_key,
+                ..
+            } => {
+                parse_single_key(trigger_key)?;
+                parse_single_key(linked_key)?;
+            }
+        }
+    }
+
     Ok(())
 }
