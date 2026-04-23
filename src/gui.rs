@@ -10,6 +10,7 @@ use crate::keymap::{
     parse_single_key, sort_hotkey_names, supported_key_names,
 };
 use crate::single_instance::SingleInstanceGuard;
+use crate::timing::SleepTimingMonitor;
 use crate::win::{foreground_window_is, foreground_window_title, is_target_window};
 use anyhow::{Context, Result, bail};
 use eframe::egui::{
@@ -332,6 +333,9 @@ impl EguiApp {
         };
         app.sync_quick_switch_monitor();
         app.sync_tray_ui()?;
+        if app.state.store.hide_gui_on_startup {
+            app.hide_main_window_to_tray()?;
+        }
         Ok(app)
     }
 
@@ -688,16 +692,10 @@ impl EguiApp {
                                                 ),
                                             );
                                             ui.end_row();
-
-                                            ui.label("轮询间隔(ms)");
-                                            ui.add_enabled(
-                                                editable,
-                                                egui::TextEdit::singleline(
-                                                    &mut self.state.draft.poll_interval_ms,
-                                                ),
-                                            );
-                                            ui.end_row();
                                         });
+
+                                    ui.add_space(6.0);
+                                    ui.small("轮询间隔会根据实际睡眠粒度自动计算。");
 
                                     ui.add_space(12.0);
                                     ui.horizontal(|ui| {
@@ -1050,6 +1048,7 @@ impl EguiApp {
     fn render_action_panel(&mut self, ui: &mut egui::Ui) {
         let running = self.state.is_runner_active();
         let panel_width = ui.available_width();
+        let sleep_timing = SleepTimingMonitor::shared().snapshot();
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_min_width(panel_width);
             ui.heading("关于我们");
@@ -1061,6 +1060,17 @@ impl EguiApp {
             {
                 ui.ctx()
                     .open_url(egui::OpenUrl::new_tab(PROJECT_GITHUB_URL));
+            }
+            ui.add_space(8.0);
+            let startup_hide_label = if self.state.store.hide_gui_on_startup {
+                "启动时隐藏 GUI：开"
+            } else {
+                "启动时隐藏 GUI：关"
+            };
+            if ui.button(startup_hide_label).clicked()
+                && let Err(err) = self.state.toggle_hide_gui_on_startup()
+            {
+                self.show_error(&format!("{err:#}"));
             }
         });
         egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -1099,6 +1109,19 @@ impl EguiApp {
             ui.add_space(16.0);
             ui.separator();
             ui.add_space(12.0);
+            ui.ctx().request_repaint_after(Duration::from_secs(1));
+            ui.label(
+                RichText::new(format!(
+                    "实际睡眠粒度: {} ms",
+                    sleep_timing.measured_granularity_ms
+                ))
+                .strong(),
+            );
+            ui.small(format!(
+                "高精度轮询间隔: {} ms",
+                sleep_timing.scheduler_interval_ms
+            ));
+            ui.add_space(10.0);
             let status_color = match self.state.tray_state {
                 TrayState::Disabled => Color32::from_rgb(170, 55, 55),
                 TrayState::Enabled => Color32::from_rgb(40, 120, 70),
@@ -2207,6 +2230,12 @@ impl AppState {
             return Ok(());
         }
         self.store.target_windows = target_windows;
+        self.store.save(&self.config_path)?;
+        Ok(())
+    }
+
+    fn toggle_hide_gui_on_startup(&mut self) -> Result<()> {
+        self.store.hide_gui_on_startup = !self.store.hide_gui_on_startup;
         self.store.save(&self.config_path)?;
         Ok(())
     }

@@ -5,6 +5,7 @@ pub const INITIAL_CONFIG_JSON: &str = r#"{
     "地下城与勇士",
     "DNF"
   ],
+  "hide_gui_on_startup": false,
   "profiles": {
     "默认配置": {
       "enabled_keys": [

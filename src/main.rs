@@ -11,6 +11,7 @@ mod initial_config;
 mod input;
 mod keymap;
 mod single_instance;
+mod timing;
 mod win;
 
 use anyhow::{Context, Result, bail};
@@ -58,7 +59,7 @@ enum ConfigAction {
         repeat_interval_ms: u64,
         #[arg(long, default_value_t = 1)]
         press_duration_ms: u64,
-        #[arg(long, default_value_t = 1)]
+        #[arg(long, default_value_t = 1, hide = true)]
         poll_interval_ms: u64,
         #[arg(long, value_delimiter = ',')]
         windows: Vec<String>,
@@ -154,7 +155,7 @@ fn handle_config_action(
             keys,
             repeat_interval_ms,
             press_duration_ms,
-            poll_interval_ms,
+            poll_interval_ms: _poll_interval_ms,
             windows,
         } => {
             if !windows.is_empty() {
@@ -174,7 +175,7 @@ fn handle_config_action(
                 enabled_keys: keys,
                 repeat_interval_ms,
                 press_duration_ms,
-                poll_interval_ms,
+                poll_interval_ms: 1,
                 combos: existing_combos,
                 special_keys: existing_special_keys,
             }

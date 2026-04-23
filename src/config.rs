@@ -353,6 +353,8 @@ pub struct ConfigStore {
     pub quick_switch_hotkey: String,
     #[serde(default = "default_target_windows")]
     pub target_windows: Vec<String>,
+    #[serde(default)]
+    pub hide_gui_on_startup: bool,
     pub profiles: BTreeMap<String, Profile>,
 }
 
@@ -364,6 +366,7 @@ impl Default for ConfigStore {
             default_profile: DEFAULT_PROFILE_NAME.to_string(),
             quick_switch_hotkey: DEFAULT_QUICK_SWITCH_HOTKEY.to_string(),
             target_windows: default_target_windows(),
+            hide_gui_on_startup: false,
             profiles,
         }
     }
@@ -886,6 +889,7 @@ mod tests {
 
         assert_eq!(store.default_profile, "默认配置");
         assert_eq!(store.quick_switch_hotkey, "LALT+BACKQUOTE");
+        assert!(!store.hide_gui_on_startup);
         assert!(
             store.profiles.contains_key("默认配置"),
             "expected embedded template profile to exist"
@@ -894,6 +898,7 @@ mod tests {
         let saved = std::fs::read_to_string(&path).expect("read saved config");
         let saved_store: ConfigStore = serde_json::from_str(&saved).expect("parse saved config");
         assert_eq!(saved_store.default_profile, "默认配置");
+        assert!(!saved_store.hide_gui_on_startup);
 
         std::fs::remove_file(PathBuf::from(&path)).expect("cleanup temp config");
     }

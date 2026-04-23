@@ -1,33 +1,51 @@
 use crate::keymap::KeySpec;
-use std::thread::sleep;
+use crate::timing::HighPrecisionSleeper;
+use std::mem::size_of;
 use std::time::Duration;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, keybd_event,
+    GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
+    KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, SendInput, VIRTUAL_KEY,
 };
 
 pub fn is_vk_down(vk: u16) -> bool {
     unsafe { (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0 }
 }
 
-pub fn send_key_once(key: KeySpec, press_duration: Duration) {
+pub fn send_key_once(key: KeySpec, press_duration: Duration, sleeper: &HighPrecisionSleeper) {
+    send_key_event(key, false);
+    sleeper.sleep_for(press_duration);
+    send_key_event(key, true);
+}
+
+fn send_key_event(key: KeySpec, key_up: bool) {
     let down_flags = if key.extended {
-        KEYEVENTF_EXTENDEDKEY
+        KEYEVENTF_SCANCODE | KEYEVENTF_EXTENDEDKEY
     } else {
-        KEYBD_EVENT_FLAGS(0)
+        KEYEVENTF_SCANCODE
     };
-    let up_flags = if key.extended {
-        KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP
+    let flags = if key_up {
+        down_flags | KEYEVENTF_KEYUP
     } else {
-        KEYEVENTF_KEYUP
+        down_flags
+    };
+    let input = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(0),
+                wScan: key.scan as u16,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
     };
 
     unsafe {
-        // Keep behavior close to DNFAutoFire Python version:
-        // set VK to 0xFF and rely on scan code for key dispatch.
-        keybd_event(0xFF, key.scan, down_flags, 0);
-    }
-    sleep(press_duration);
-    unsafe {
-        keybd_event(0xFF, key.scan, up_flags, 0);
+        let sent = SendInput(&[input], size_of::<INPUT>() as i32);
+        debug_assert_eq!(
+            sent, 1,
+            "SendInput should submit exactly one keyboard event"
+        );
     }
 }

@@ -8,7 +8,6 @@ pub struct ProfileDraft {
     pub enabled_keys: Vec<String>,
     pub repeat_interval_ms: String,
     pub press_duration_ms: String,
-    pub poll_interval_ms: String,
     pub combos: Vec<ComboConfig>,
     pub special_keys: Vec<SpecialKeyConfig>,
 }
@@ -20,7 +19,6 @@ impl ProfileDraft {
             enabled_keys: profile.enabled_keys.clone(),
             repeat_interval_ms: profile.repeat_interval_ms.to_string(),
             press_duration_ms: profile.press_duration_ms.to_string(),
-            poll_interval_ms: profile.poll_interval_ms.to_string(),
             combos: profile.combos.clone(),
             special_keys: profile.special_keys.clone(),
         }
@@ -34,13 +32,11 @@ impl ProfileDraft {
 
         let repeat_interval_ms = parse_ms(&self.repeat_interval_ms, "连发间隔")?;
         let press_duration_ms = parse_ms(&self.press_duration_ms, "按下时长")?;
-        let poll_interval_ms = parse_ms(&self.poll_interval_ms, "轮询间隔")?;
-
         let profile = Profile {
             enabled_keys: self.enabled_keys.clone(),
             repeat_interval_ms,
             press_duration_ms,
-            poll_interval_ms,
+            poll_interval_ms: 1,
             combos: self.combos.clone(),
             special_keys: self.special_keys.clone(),
         }
@@ -140,7 +136,7 @@ mod tests {
         assert_eq!(restored.enabled_keys, profile.enabled_keys);
         assert_eq!(restored.repeat_interval_ms, profile.repeat_interval_ms);
         assert_eq!(restored.press_duration_ms, profile.press_duration_ms);
-        assert_eq!(restored.poll_interval_ms, profile.poll_interval_ms);
+        assert_eq!(restored.poll_interval_ms, 1);
         assert_eq!(restored.combos.len(), 1);
         assert_eq!(restored.combos[0].steps.len(), 3);
         assert_eq!(restored.combos[0].steps[0].key, "A");
@@ -164,7 +160,6 @@ mod tests {
             enabled_keys: Vec::new(),
             repeat_interval_ms: "1".to_string(),
             press_duration_ms: "1".to_string(),
-            poll_interval_ms: "1".to_string(),
             combos: vec![ComboConfig {
                 name: "burst".to_string(),
                 trigger_key: "U".to_string(),

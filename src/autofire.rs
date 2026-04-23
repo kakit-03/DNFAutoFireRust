@@ -1,12 +1,13 @@
 use crate::config::{ComboStepConfig, LinkedTriggerMode, Profile, SpecialKeyConfig};
 use crate::input::{is_vk_down, send_key_once};
 use crate::keymap::{KeySpec, parse_hotkey, parse_key_specs, parse_single_key};
+use crate::timing::{HighPrecisionSleeper, SleepTimingMonitor, SleepTimingSnapshot};
 use crate::win::{foreground_window_ime_open, foreground_window_title, is_target_window};
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::{self, JoinHandle, sleep};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,12 +119,12 @@ struct RuntimeProfile {
     custom_autofires: Vec<RuntimeCustomAutofire>,
     auto_triggers: Vec<RuntimeAutoTrigger>,
     linked_keys: Vec<RuntimeLinkedKey>,
-    repeat_interval: Duration,
-    press_duration: Duration,
-    poll_interval: Duration,
+    repeat_interval_ms: u64,
+    press_duration_ms: u64,
     combo_trigger_vks: HashSet<u16>,
     custom_autofire_vks: HashSet<u16>,
     target_windows: Vec<String>,
+    sleep_timing: SleepTimingMonitor,
 }
 
 impl RuntimeProfile {
@@ -154,12 +155,12 @@ impl RuntimeProfile {
             custom_autofires,
             auto_triggers,
             linked_keys,
-            repeat_interval: Duration::from_millis(profile.repeat_interval_ms.max(1)),
-            press_duration: Duration::from_millis(profile.press_duration_ms.max(1)),
-            poll_interval: Duration::from_millis(profile.poll_interval_ms.max(1)),
+            repeat_interval_ms: profile.repeat_interval_ms.max(1),
+            press_duration_ms: profile.press_duration_ms.max(1),
             combo_trigger_vks,
             custom_autofire_vks,
             target_windows: target_windows.to_vec(),
+            sleep_timing: SleepTimingMonitor::shared(),
         })
     }
 }
@@ -174,16 +175,16 @@ struct RuntimeCombo {
 #[derive(Clone)]
 struct RuntimeComboStep {
     key: KeySpec,
-    interval: Duration,
-    press_duration: Duration,
+    interval_ms: u64,
+    press_duration_ms: u64,
 }
 
 #[derive(Clone)]
 struct RuntimeCustomAutofire {
     name: String,
     key: KeySpec,
-    repeat_interval: Duration,
-    press_duration: Duration,
+    repeat_interval_ms: u64,
+    press_duration_ms: u64,
 }
 
 #[derive(Clone)]
@@ -197,8 +198,8 @@ struct RuntimeAutoTrigger {
     name: String,
     key: KeySpec,
     trigger_hotkey: RuntimeHotkey,
-    repeat_interval: Duration,
-    press_duration: Duration,
+    repeat_interval_ms: u64,
+    press_duration_ms: u64,
 }
 
 #[derive(Clone)]
@@ -207,8 +208,8 @@ struct RuntimeLinkedKey {
     trigger_key: KeySpec,
     linked_key: KeySpec,
     trigger_mode: LinkedTriggerMode,
-    interval: Duration,
-    press_duration: Duration,
+    interval_ms: u64,
+    press_duration_ms: u64,
 }
 
 struct ActiveCombo {
@@ -221,21 +222,52 @@ struct ActiveCombo {
 struct PendingLinkedKey {
     key: KeySpec,
     execute_at: Instant,
-    press_duration: Duration,
+    press_duration_ms: u64,
+}
+
+impl RuntimeProfile {
+    fn sleep_timing_snapshot(&self) -> SleepTimingSnapshot {
+        self.sleep_timing.snapshot()
+    }
+}
+
+fn effective_poll_duration(timing: SleepTimingSnapshot) -> Duration {
+    Duration::from_millis(timing.scheduler_interval_ms.max(1))
+}
+
+fn configured_interval_duration(base_ms: u64) -> Duration {
+    Duration::from_millis(base_ms.max(1))
+}
+
+fn configured_press_duration(base_ms: u64) -> Duration {
+    Duration::from_millis(base_ms.max(1))
+}
+
+fn combo_step_cycle_duration(step: &RuntimeComboStep) -> Duration {
+    configured_press_duration(step.press_duration_ms)
+        + configured_interval_duration(step.interval_ms)
 }
 
 fn print_start_summary(runtime: &RuntimeProfile) {
+    let timing = runtime.sleep_timing_snapshot();
     println!(
-        "连发启动: keys=[{}], repeat={}ms, press={}ms, poll={}ms",
+        "连发启动: keys=[{}], repeat={}ms, press={}ms, scheduler={}ms, sleep={}ms",
         runtime
             .keys
             .iter()
             .map(|k| k.name)
             .collect::<Vec<_>>()
             .join(","),
-        runtime.repeat_interval.as_millis(),
-        runtime.press_duration.as_millis(),
-        runtime.poll_interval.as_millis()
+        runtime.repeat_interval_ms,
+        runtime.press_duration_ms,
+        timing.scheduler_interval_ms,
+        timing.measured_granularity_ms
+    );
+    println!(
+        "高精度定时: timer_resolution={}, hidden_window_fix={}, high_res_waitable_timer={}",
+        yes_no(timing.timer_resolution_requested),
+        yes_no(timing.occlusion_workaround_enabled),
+        yes_no(timing.high_resolution_waitable_timer)
     );
     println!("目标窗口关键字: {}", runtime.target_windows.join(", "));
     if runtime.combos.is_empty() {
@@ -257,9 +289,7 @@ fn print_start_summary(runtime: &RuntimeProfile) {
                             .map(|step| {
                                 format!(
                                     "{}@{}ms/{}ms",
-                                    step.key.name,
-                                    step.interval.as_millis(),
-                                    step.press_duration.as_millis()
+                                    step.key.name, step.interval_ms, step.press_duration_ms
                                 )
                             })
                             .collect::<Vec<_>>()
@@ -280,10 +310,7 @@ fn print_start_summary(runtime: &RuntimeProfile) {
         items.extend(runtime.custom_autofires.iter().map(|entry| {
             format!(
                 "{}[独立连发:{}@{}ms/{}ms]",
-                entry.name,
-                entry.key.name,
-                entry.repeat_interval.as_millis(),
-                entry.press_duration.as_millis()
+                entry.name, entry.key.name, entry.repeat_interval_ms, entry.press_duration_ms
             )
         }));
         items.extend(runtime.auto_triggers.iter().map(|entry| {
@@ -292,8 +319,8 @@ fn print_start_summary(runtime: &RuntimeProfile) {
                 entry.name,
                 entry.key.name,
                 entry.trigger_hotkey.text,
-                entry.repeat_interval.as_millis(),
-                entry.press_duration.as_millis()
+                entry.repeat_interval_ms,
+                entry.press_duration_ms
             )
         }));
         items.extend(runtime.linked_keys.iter().map(|entry| {
@@ -303,8 +330,8 @@ fn print_start_summary(runtime: &RuntimeProfile) {
                 entry.trigger_key.name,
                 linked_trigger_mode_label(entry.trigger_mode),
                 entry.linked_key.name,
-                entry.interval.as_millis(),
-                entry.press_duration.as_millis()
+                entry.interval_ms,
+                entry.press_duration_ms
             )
         }));
         println!("已加载特殊键位: {}", items.join("; "));
@@ -317,6 +344,7 @@ where
     F: Fn(RunnerEvent),
 {
     on_event(RunnerEvent::Started);
+    let sleeper = HighPrecisionSleeper::new();
 
     let mut last_sent_at: HashMap<u16, Instant> = HashMap::new();
     let mut trigger_states: HashMap<u16, bool> = runtime
@@ -337,6 +365,7 @@ where
         if stop_requested.load(Ordering::SeqCst) {
             break StopReason::StopRequested;
         }
+        let sleep_timing = runtime.sleep_timing_snapshot();
 
         let title = foreground_window_title();
         let active_now = is_target_window(&title, &runtime.target_windows);
@@ -372,7 +401,7 @@ where
                 update_trigger_states(&runtime.combos, &mut trigger_states);
                 update_auto_trigger_states(&runtime.auto_triggers, &mut auto_trigger_hotkey_states);
                 update_linked_key_states(&runtime.linked_keys, &mut linked_key_trigger_states);
-                sleep(runtime.poll_interval);
+                sleeper.sleep_for(effective_poll_duration(sleep_timing));
                 continue;
             }
 
@@ -388,9 +417,9 @@ where
                 &mut linked_key_trigger_states,
                 &mut pending_linked_keys,
             );
-            run_due_combo_steps(&mut active_combos);
-            run_due_linked_keys(&mut pending_linked_keys);
-            run_custom_autofires(&runtime.custom_autofires, &mut last_sent_at);
+            run_due_combo_steps(&mut active_combos, &sleeper);
+            run_due_linked_keys(&mut pending_linked_keys, &sleeper);
+            run_custom_autofires(&runtime.custom_autofires, &mut last_sent_at, &sleeper);
 
             for key in &runtime.keys {
                 if runtime.combo_trigger_vks.contains(&key.vk)
@@ -405,19 +434,26 @@ where
 
                 let should_send = last_sent_at
                     .get(&key.vk)
-                    .map(|ts| ts.elapsed() >= runtime.repeat_interval)
+                    .map(|ts| {
+                        ts.elapsed() >= configured_interval_duration(runtime.repeat_interval_ms)
+                    })
                     .unwrap_or(true);
                 if !should_send {
                     continue;
                 }
 
-                send_key_once(*key, runtime.press_duration);
+                send_key_once(
+                    *key,
+                    configured_press_duration(runtime.press_duration_ms),
+                    &sleeper,
+                );
                 last_sent_at.insert(key.vk, Instant::now());
             }
             run_enabled_auto_triggers(
                 &runtime.auto_triggers,
                 &auto_trigger_enabled,
                 &mut auto_trigger_last_sent_at,
+                &sleeper,
             );
         } else {
             update_trigger_states(&runtime.combos, &mut trigger_states);
@@ -425,7 +461,20 @@ where
             update_linked_key_states(&runtime.linked_keys, &mut linked_key_trigger_states);
         }
 
-        sleep(runtime.poll_interval);
+        let now = Instant::now();
+        let next_poll_at = now + effective_poll_duration(sleep_timing);
+        let next_deadline = next_runtime_deadline(
+            &runtime,
+            &active_combos,
+            &pending_linked_keys,
+            &last_sent_at,
+            &auto_trigger_enabled,
+            &auto_trigger_last_sent_at,
+            now,
+        )
+        .map(|deadline| deadline.min(next_poll_at))
+        .unwrap_or(next_poll_at);
+        sleeper.sleep_until(next_deadline);
     };
 
     on_event(RunnerEvent::Stopped(stop_reason));
@@ -458,8 +507,8 @@ fn build_runtime_combo_steps(steps: &[ComboStepConfig]) -> Result<Vec<RuntimeCom
             let key = parse_single_key(&step.key)?;
             Ok(RuntimeComboStep {
                 key,
-                interval: Duration::from_millis(step.interval_ms.max(1)),
-                press_duration: Duration::from_millis(step.press_duration_ms.max(1)),
+                interval_ms: step.interval_ms.max(1),
+                press_duration_ms: step.press_duration_ms.max(1),
             })
         })
         .collect()
@@ -483,8 +532,8 @@ fn build_runtime_custom_autofires(profile: &Profile) -> Result<Vec<RuntimeCustom
             Ok(RuntimeCustomAutofire {
                 name: name.clone(),
                 key,
-                repeat_interval: Duration::from_millis((*repeat_interval_ms).max(1)),
-                press_duration: Duration::from_millis((*press_duration_ms).max(1)),
+                repeat_interval_ms: (*repeat_interval_ms).max(1),
+                press_duration_ms: (*press_duration_ms).max(1),
             })
         })
         .collect()
@@ -521,8 +570,8 @@ fn build_runtime_auto_triggers(profile: &Profile) -> Result<Vec<RuntimeAutoTrigg
                         text: trigger_hotkey.clone(),
                         specs,
                     },
-                    repeat_interval: Duration::from_millis((*repeat_interval_ms).max(1)),
-                    press_duration: Duration::from_millis((*press_duration_ms).max(1)),
+                    repeat_interval_ms: (*repeat_interval_ms).max(1),
+                    press_duration_ms: (*press_duration_ms).max(1),
                 })
             },
         )
@@ -558,8 +607,8 @@ fn build_runtime_linked_keys(profile: &Profile) -> Result<Vec<RuntimeLinkedKey>>
                     trigger_key: parse_single_key(trigger_key)?,
                     linked_key: parse_single_key(linked_key)?,
                     trigger_mode,
-                    interval: Duration::from_millis((*interval_ms).max(1)),
-                    press_duration: Duration::from_millis((*press_duration_ms).max(1)),
+                    interval_ms: (*interval_ms).max(1),
+                    press_duration_ms: (*press_duration_ms).max(1),
                 })
             },
         )
@@ -593,6 +642,7 @@ fn trigger_combos(
 fn run_custom_autofires(
     custom_autofires: &[RuntimeCustomAutofire],
     last_sent_at: &mut HashMap<u16, Instant>,
+    sleeper: &HighPrecisionSleeper,
 ) {
     for custom in custom_autofires {
         if !is_vk_down(custom.key.vk) {
@@ -602,34 +652,40 @@ fn run_custom_autofires(
 
         let should_send = last_sent_at
             .get(&custom.key.vk)
-            .map(|ts| ts.elapsed() >= custom.repeat_interval)
+            .map(|ts| ts.elapsed() >= configured_interval_duration(custom.repeat_interval_ms))
             .unwrap_or(true);
         if !should_send {
             continue;
         }
 
-        send_key_once(custom.key, custom.press_duration);
+        send_key_once(
+            custom.key,
+            configured_press_duration(custom.press_duration_ms),
+            sleeper,
+        );
         last_sent_at.insert(custom.key.vk, Instant::now());
     }
 }
 
-fn run_due_combo_steps(active_combos: &mut Vec<ActiveCombo>) {
-    let now = Instant::now();
+fn run_due_combo_steps(active_combos: &mut Vec<ActiveCombo>, sleeper: &HighPrecisionSleeper) {
     let mut completed = Vec::new();
 
     for (index, combo) in active_combos.iter_mut().enumerate() {
-        if now < combo.next_at || combo.next_index >= combo.steps.len() {
-            continue;
-        }
+        while combo.next_index < combo.steps.len() && Instant::now() >= combo.next_at {
+            let step = combo.steps[combo.next_index].clone();
+            send_key_once(
+                step.key,
+                configured_press_duration(step.press_duration_ms),
+                sleeper,
+            );
+            combo.next_index += 1;
 
-        let step = combo.steps[combo.next_index].clone();
-        send_key_once(step.key, step.press_duration);
-        combo.next_index += 1;
+            if combo.next_index >= combo.steps.len() {
+                completed.push(index);
+                break;
+            }
 
-        if combo.next_index >= combo.steps.len() {
-            completed.push(index);
-        } else {
-            combo.next_at = Instant::now() + step.interval;
+            combo.next_at += combo_step_cycle_duration(&step);
         }
     }
 
@@ -667,6 +723,7 @@ fn run_enabled_auto_triggers(
     auto_triggers: &[RuntimeAutoTrigger],
     enabled_states: &[bool],
     last_sent_at: &mut [Option<Instant>],
+    sleeper: &HighPrecisionSleeper,
 ) {
     for (index, trigger) in auto_triggers.iter().enumerate() {
         if !enabled_states.get(index).copied().unwrap_or(false) {
@@ -674,13 +731,17 @@ fn run_enabled_auto_triggers(
         }
 
         let should_send = last_sent_at[index]
-            .map(|ts| ts.elapsed() >= trigger.repeat_interval)
+            .map(|ts| ts.elapsed() >= configured_interval_duration(trigger.repeat_interval_ms))
             .unwrap_or(true);
         if !should_send {
             continue;
         }
 
-        send_key_once(trigger.key, trigger.press_duration);
+        send_key_once(
+            trigger.key,
+            configured_press_duration(trigger.press_duration_ms),
+            sleeper,
+        );
         last_sent_at[index] = Some(Instant::now());
     }
 }
@@ -700,8 +761,8 @@ fn trigger_linked_keys(
         if should_trigger {
             pending_linked_keys.push(PendingLinkedKey {
                 key: linked.linked_key,
-                execute_at: Instant::now() + linked.interval,
-                press_duration: linked.press_duration,
+                execute_at: Instant::now() + configured_interval_duration(linked.interval_ms),
+                press_duration_ms: linked.press_duration_ms,
             });
         }
         trigger_states[index] = is_down;
@@ -714,20 +775,102 @@ fn update_linked_key_states(linked_keys: &[RuntimeLinkedKey], trigger_states: &m
     }
 }
 
-fn run_due_linked_keys(pending_linked_keys: &mut Vec<PendingLinkedKey>) {
+fn run_due_linked_keys(
+    pending_linked_keys: &mut Vec<PendingLinkedKey>,
+    sleeper: &HighPrecisionSleeper,
+) {
     let now = Instant::now();
     let mut completed = Vec::new();
     for (index, pending) in pending_linked_keys.iter().enumerate() {
         if now < pending.execute_at {
             continue;
         }
-        send_key_once(pending.key, pending.press_duration);
+        send_key_once(
+            pending.key,
+            configured_press_duration(pending.press_duration_ms),
+            sleeper,
+        );
         completed.push(index);
     }
 
     for index in completed.into_iter().rev() {
         pending_linked_keys.remove(index);
     }
+}
+
+fn next_runtime_deadline(
+    runtime: &RuntimeProfile,
+    active_combos: &[ActiveCombo],
+    pending_linked_keys: &[PendingLinkedKey],
+    last_sent_at: &HashMap<u16, Instant>,
+    auto_trigger_enabled: &[bool],
+    auto_trigger_last_sent_at: &[Option<Instant>],
+    now: Instant,
+) -> Option<Instant> {
+    let mut next_deadline = active_combos
+        .iter()
+        .filter(|combo| combo.next_index < combo.steps.len())
+        .map(|combo| combo.next_at)
+        .min();
+
+    for pending in pending_linked_keys {
+        merge_earlier_deadline(&mut next_deadline, pending.execute_at);
+    }
+
+    for custom in &runtime.custom_autofires {
+        if !is_vk_down(custom.key.vk) {
+            continue;
+        }
+
+        let due_at = last_sent_at
+            .get(&custom.key.vk)
+            .map(|ts| *ts + configured_interval_duration(custom.repeat_interval_ms))
+            .unwrap_or(now);
+        merge_earlier_deadline(&mut next_deadline, due_at);
+    }
+
+    for key in &runtime.keys {
+        if runtime.combo_trigger_vks.contains(&key.vk)
+            || runtime.custom_autofire_vks.contains(&key.vk)
+        {
+            continue;
+        }
+        if !is_vk_down(key.vk) {
+            continue;
+        }
+
+        let due_at = last_sent_at
+            .get(&key.vk)
+            .map(|ts| *ts + configured_interval_duration(runtime.repeat_interval_ms))
+            .unwrap_or(now);
+        merge_earlier_deadline(&mut next_deadline, due_at);
+    }
+
+    for (index, trigger) in runtime.auto_triggers.iter().enumerate() {
+        if !auto_trigger_enabled.get(index).copied().unwrap_or(false) {
+            continue;
+        }
+
+        let due_at = auto_trigger_last_sent_at
+            .get(index)
+            .and_then(|ts| *ts)
+            .map(|ts| ts + configured_interval_duration(trigger.repeat_interval_ms))
+            .unwrap_or(now);
+        merge_earlier_deadline(&mut next_deadline, due_at);
+    }
+
+    next_deadline
+}
+
+fn merge_earlier_deadline(next_deadline: &mut Option<Instant>, candidate: Instant) {
+    match next_deadline {
+        Some(current) if candidate >= *current => {}
+        _ => *next_deadline = Some(candidate),
+    }
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "on" } else { "off" }
 }
 
 fn update_trigger_states(combos: &[RuntimeCombo], trigger_states: &mut HashMap<u16, bool>) {
