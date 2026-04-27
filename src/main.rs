@@ -16,7 +16,11 @@ mod win;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use config::{ComboConfig, ComboStepConfig, ConfigStore, Profile, SpecialKeyConfig};
+use config::{
+    ComboConfig, ComboStepConfig, ConfigStore, Profile, SpecialKeyConfig,
+    DEFAULT_COMBO_STEP_INTERVAL_MS, DEFAULT_COMBO_STEP_PRESS_DURATION_MS,
+    DEFAULT_POLL_INTERVAL_MS, DEFAULT_PRESS_DURATION_MS, DEFAULT_REPEAT_INTERVAL_MS,
+};
 use keymap::{normalize_hotkey_text, parse_hotkey, parse_key_specs, parse_single_key};
 use std::path::PathBuf;
 
@@ -55,11 +59,11 @@ enum ConfigAction {
         name: String,
         #[arg(long, value_delimiter = ',')]
         keys: Vec<String>,
-        #[arg(long, default_value_t = 1)]
+        #[arg(long, default_value_t = DEFAULT_REPEAT_INTERVAL_MS)]
         repeat_interval_ms: u64,
-        #[arg(long, default_value_t = 1)]
+        #[arg(long, default_value_t = DEFAULT_PRESS_DURATION_MS)]
         press_duration_ms: u64,
-        #[arg(long, default_value_t = 1, hide = true)]
+        #[arg(long, default_value_t = DEFAULT_POLL_INTERVAL_MS, hide = true)]
         poll_interval_ms: u64,
         #[arg(long, value_delimiter = ',')]
         windows: Vec<String>,
@@ -73,9 +77,9 @@ enum ConfigAction {
         trigger_key: String,
         #[arg(long, value_delimiter = ',')]
         sequence_keys: Vec<String>,
-        #[arg(long, default_value_t = 80)]
+        #[arg(long, default_value_t = DEFAULT_COMBO_STEP_INTERVAL_MS)]
         step_interval_ms: u64,
-        #[arg(long, default_value_t = 1)]
+        #[arg(long, default_value_t = DEFAULT_COMBO_STEP_PRESS_DURATION_MS)]
         press_duration_ms: u64,
     },
     RemoveCombo {
@@ -175,7 +179,7 @@ fn handle_config_action(
                 enabled_keys: keys,
                 repeat_interval_ms,
                 press_duration_ms,
-                poll_interval_ms: 1,
+                poll_interval_ms: DEFAULT_POLL_INTERVAL_MS,
                 combos: existing_combos,
                 special_keys: existing_special_keys,
             }

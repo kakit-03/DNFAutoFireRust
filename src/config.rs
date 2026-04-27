@@ -10,6 +10,11 @@ const DEFAULT_PROFILE_NAME: &str = "default";
 const DEFAULT_KEYS: [&str; 1] = ["J"];
 const DEFAULT_TARGET_WINDOWS: [&str; 2] = ["地下城与勇士", "DNF"];
 const DEFAULT_QUICK_SWITCH_HOTKEY: &str = "LCTRL+BACKQUOTE";
+pub const DEFAULT_REPEAT_INTERVAL_MS: u64 = 10;
+pub const DEFAULT_PRESS_DURATION_MS: u64 = 15;
+pub const DEFAULT_POLL_INTERVAL_MS: u64 = 1;
+pub const DEFAULT_COMBO_STEP_INTERVAL_MS: u64 = 8;
+pub const DEFAULT_COMBO_STEP_PRESS_DURATION_MS: u64 = 20;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComboStepConfig {
@@ -23,10 +28,13 @@ impl ComboStepConfig {
     pub fn normalized_with_fallback(mut self, fallback_press_duration_ms: u64) -> Self {
         self.key = self.key.trim().to_ascii_uppercase();
         if self.interval_ms == 0 {
-            self.interval_ms = 1;
+            self.interval_ms = DEFAULT_COMBO_STEP_INTERVAL_MS;
         }
         if self.press_duration_ms == 0 {
-            self.press_duration_ms = fallback_press_duration_ms.max(1);
+            self.press_duration_ms = normalize_ms_or_default(
+                fallback_press_duration_ms,
+                DEFAULT_COMBO_STEP_PRESS_DURATION_MS,
+            );
         }
         self
     }
@@ -63,8 +71,12 @@ impl ComboConfig {
     pub fn normalized(mut self) -> Self {
         self.name = self.name.trim().to_string();
         self.trigger_key = self.trigger_key.trim().to_ascii_uppercase();
-        let fallback_interval = self.step_interval_ms.max(1);
-        let fallback_press_duration = self.press_duration_ms.max(1);
+        let fallback_interval =
+            normalize_ms_or_default(self.step_interval_ms, DEFAULT_COMBO_STEP_INTERVAL_MS);
+        let fallback_press_duration = normalize_ms_or_default(
+            self.press_duration_ms,
+            DEFAULT_COMBO_STEP_PRESS_DURATION_MS,
+        );
 
         if self.steps.is_empty() {
             self.steps = normalize_key_sequence(&self.sequence_keys)
@@ -154,8 +166,14 @@ impl SpecialKeyConfig {
             } => Self::CustomAutofire {
                 name: name.trim().to_string(),
                 key: key.trim().to_ascii_uppercase(),
-                repeat_interval_ms: repeat_interval_ms.max(1),
-                press_duration_ms: press_duration_ms.max(1),
+                repeat_interval_ms: normalize_ms_or_default(
+                    repeat_interval_ms,
+                    DEFAULT_REPEAT_INTERVAL_MS,
+                ),
+                press_duration_ms: normalize_ms_or_default(
+                    press_duration_ms,
+                    DEFAULT_PRESS_DURATION_MS,
+                ),
             },
             Self::AutoTrigger {
                 name,
@@ -167,8 +185,14 @@ impl SpecialKeyConfig {
                 name: name.trim().to_string(),
                 key: key.trim().to_ascii_uppercase(),
                 trigger_hotkey: normalize_special_hotkey_text(&trigger_hotkey),
-                repeat_interval_ms: repeat_interval_ms.max(1),
-                press_duration_ms: press_duration_ms.max(1),
+                repeat_interval_ms: normalize_ms_or_default(
+                    repeat_interval_ms,
+                    DEFAULT_REPEAT_INTERVAL_MS,
+                ),
+                press_duration_ms: normalize_ms_or_default(
+                    press_duration_ms,
+                    DEFAULT_PRESS_DURATION_MS,
+                ),
             },
             Self::LinkedKey {
                 name,
@@ -182,8 +206,14 @@ impl SpecialKeyConfig {
                 trigger_key: trigger_key.trim().to_ascii_uppercase(),
                 linked_key: linked_key.trim().to_ascii_uppercase(),
                 trigger_mode,
-                interval_ms: interval_ms.max(1),
-                press_duration_ms: press_duration_ms.max(1),
+                interval_ms: normalize_ms_or_default(
+                    interval_ms,
+                    DEFAULT_COMBO_STEP_INTERVAL_MS,
+                ),
+                press_duration_ms: normalize_ms_or_default(
+                    press_duration_ms,
+                    DEFAULT_COMBO_STEP_PRESS_DURATION_MS,
+                ),
             },
         }
     }
@@ -280,9 +310,9 @@ impl Default for Profile {
     fn default() -> Self {
         Self {
             enabled_keys: DEFAULT_KEYS.iter().map(|s| (*s).to_string()).collect(),
-            repeat_interval_ms: 1,
-            press_duration_ms: 1,
-            poll_interval_ms: 1,
+            repeat_interval_ms: DEFAULT_REPEAT_INTERVAL_MS,
+            press_duration_ms: DEFAULT_PRESS_DURATION_MS,
+            poll_interval_ms: DEFAULT_POLL_INTERVAL_MS,
             combos: Vec::new(),
             special_keys: Vec::new(),
         }
@@ -308,13 +338,13 @@ impl Profile {
         }
 
         if self.repeat_interval_ms == 0 {
-            self.repeat_interval_ms = 1;
+            self.repeat_interval_ms = DEFAULT_REPEAT_INTERVAL_MS;
         }
         if self.press_duration_ms == 0 {
-            self.press_duration_ms = 1;
+            self.press_duration_ms = DEFAULT_PRESS_DURATION_MS;
         }
         if self.poll_interval_ms == 0 {
-            self.poll_interval_ms = 1;
+            self.poll_interval_ms = DEFAULT_POLL_INTERVAL_MS;
         }
 
         self
@@ -557,6 +587,10 @@ fn is_zero(value: &u64) -> bool {
     *value == 0
 }
 
+fn normalize_ms_or_default(value: u64, default: u64) -> u64 {
+    if value == 0 { default } else { value.max(1) }
+}
+
 fn normalize_key_sequence(tokens: &[String]) -> Vec<String> {
     tokens
         .iter()
@@ -583,6 +617,8 @@ fn normalize_special_hotkey_text(raw: &str) -> String {
 mod tests {
     use super::{
         ComboConfig, ComboStepConfig, ConfigStore, LinkedTriggerMode, Profile, SpecialKeyConfig,
+        DEFAULT_COMBO_STEP_INTERVAL_MS, DEFAULT_COMBO_STEP_PRESS_DURATION_MS,
+        DEFAULT_POLL_INTERVAL_MS, DEFAULT_PRESS_DURATION_MS, DEFAULT_REPEAT_INTERVAL_MS,
     };
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -600,9 +636,9 @@ mod tests {
         .normalized();
 
         assert!(!profile.enabled_keys.is_empty());
-        assert_eq!(profile.repeat_interval_ms, 1);
-        assert_eq!(profile.press_duration_ms, 1);
-        assert_eq!(profile.poll_interval_ms, 1);
+        assert_eq!(profile.repeat_interval_ms, DEFAULT_REPEAT_INTERVAL_MS);
+        assert_eq!(profile.press_duration_ms, DEFAULT_PRESS_DURATION_MS);
+        assert_eq!(profile.poll_interval_ms, DEFAULT_POLL_INTERVAL_MS);
     }
 
     #[test]
@@ -637,8 +673,11 @@ mod tests {
         assert_eq!(combo.trigger_key, "J");
         assert_eq!(combo.steps.len(), 3);
         assert_eq!(combo.steps[0].key, "A");
-        assert_eq!(combo.steps[0].interval_ms, 1);
-        assert_eq!(combo.steps[0].press_duration_ms, 1);
+        assert_eq!(combo.steps[0].interval_ms, DEFAULT_COMBO_STEP_INTERVAL_MS);
+        assert_eq!(
+            combo.steps[0].press_duration_ms,
+            DEFAULT_COMBO_STEP_PRESS_DURATION_MS
+        );
         assert_eq!(combo.steps[1].key, "A");
         assert_eq!(combo.steps[2].key, "B");
         assert_eq!(combo.steps[2].press_duration_ms, 3);
@@ -825,8 +864,8 @@ mod tests {
             } => {
                 assert_eq!(name, "custom");
                 assert_eq!(key, "J");
-                assert_eq!(*repeat_interval_ms, 1);
-                assert_eq!(*press_duration_ms, 1);
+                assert_eq!(*repeat_interval_ms, DEFAULT_REPEAT_INTERVAL_MS);
+                assert_eq!(*press_duration_ms, DEFAULT_PRESS_DURATION_MS);
             }
             _ => panic!("expected custom autofire"),
         }
@@ -837,8 +876,15 @@ mod tests {
             _ => panic!("expected auto trigger"),
         }
         match &profile.special_keys[2] {
-            SpecialKeyConfig::LinkedKey { trigger_mode, .. } => {
+            SpecialKeyConfig::LinkedKey {
+                trigger_mode,
+                interval_ms,
+                press_duration_ms,
+                ..
+            } => {
                 assert_eq!(*trigger_mode, LinkedTriggerMode::Release);
+                assert_eq!(*interval_ms, DEFAULT_COMBO_STEP_INTERVAL_MS);
+                assert_eq!(*press_duration_ms, DEFAULT_COMBO_STEP_PRESS_DURATION_MS);
             }
             _ => panic!("expected linked key"),
         }
@@ -894,6 +940,10 @@ mod tests {
             store.profiles.contains_key("默认配置"),
             "expected embedded template profile to exist"
         );
+        let profile = &store.profiles["默认配置"];
+        assert_eq!(profile.repeat_interval_ms, DEFAULT_REPEAT_INTERVAL_MS);
+        assert_eq!(profile.press_duration_ms, DEFAULT_PRESS_DURATION_MS);
+        assert_eq!(profile.poll_interval_ms, DEFAULT_POLL_INTERVAL_MS);
 
         let saved = std::fs::read_to_string(&path).expect("read saved config");
         let saved_store: ConfigStore = serde_json::from_str(&saved).expect("parse saved config");

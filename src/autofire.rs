@@ -1,8 +1,8 @@
 use crate::config::{ComboStepConfig, LinkedTriggerMode, Profile, SpecialKeyConfig};
-use crate::input::{is_vk_down, send_key_once};
+use crate::input::{is_vk_down, send_key_once, synthetic_key_is_down};
 use crate::keymap::{KeySpec, parse_hotkey, parse_key_specs, parse_single_key};
 use crate::timing::{HighPrecisionSleeper, SleepTimingMonitor, SleepTimingSnapshot};
-use crate::win::{foreground_window_ime_open, foreground_window_title, is_target_window};
+use crate::win::{foreground_window_info, window_ime_open};
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -119,10 +119,9 @@ struct RuntimeProfile {
     custom_autofires: Vec<RuntimeCustomAutofire>,
     auto_triggers: Vec<RuntimeAutoTrigger>,
     linked_keys: Vec<RuntimeLinkedKey>,
+    monitored_vks: Vec<u16>,
     repeat_interval_ms: u64,
     press_duration_ms: u64,
-    combo_trigger_vks: HashSet<u16>,
-    custom_autofire_vks: HashSet<u16>,
     target_windows: Vec<String>,
     sleep_timing: SleepTimingMonitor,
 }
@@ -146,8 +145,13 @@ impl RuntimeProfile {
             .context("invalid auto trigger config in profile")?;
         let linked_keys =
             build_runtime_linked_keys(profile).context("invalid linked key config in profile")?;
-        let combo_trigger_vks = combos.iter().map(|combo| combo.trigger.vk).collect();
-        let custom_autofire_vks = custom_autofires.iter().map(|entry| entry.key.vk).collect();
+        let monitored_vks = collect_monitored_vks(
+            &keys,
+            &combos,
+            &custom_autofires,
+            &auto_triggers,
+            &linked_keys,
+        );
 
         Ok(Self {
             keys,
@@ -155,10 +159,9 @@ impl RuntimeProfile {
             custom_autofires,
             auto_triggers,
             linked_keys,
+            monitored_vks,
             repeat_interval_ms: profile.repeat_interval_ms.max(1),
             press_duration_ms: profile.press_duration_ms.max(1),
-            combo_trigger_vks,
-            custom_autofire_vks,
             target_windows: target_windows.to_vec(),
             sleep_timing: SleepTimingMonitor::shared(),
         })
@@ -212,17 +215,149 @@ struct RuntimeLinkedKey {
     press_duration_ms: u64,
 }
 
-struct ActiveCombo {
-    name: String,
-    steps: Vec<RuntimeComboStep>,
-    next_index: usize,
-    next_at: Instant,
+#[derive(Clone)]
+struct RuntimeRepeatBinding {
+    key: KeySpec,
+    trigger: RepeatTrigger,
+    repeat_interval: Duration,
+    press_duration: Duration,
 }
 
-struct PendingLinkedKey {
+#[derive(Clone)]
+enum RepeatTrigger {
+    HoldKey(u16),
+    ToggleHotkey(RuntimeHotkey),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepeatPhase {
+    Idle,
+    Queued,
+    Recovering { until: Instant },
+}
+
+struct RepeatBindingState {
+    trigger_down: bool,
+    enabled: bool,
+    phase: RepeatPhase,
+}
+
+impl Default for RepeatBindingState {
+    fn default() -> Self {
+        Self {
+            trigger_down: false,
+            enabled: false,
+            phase: RepeatPhase::Idle,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComboPhase {
+    Idle,
+    Ready { step_index: usize, ready_at: Instant },
+    Queued { step_index: usize },
+    Recovering { next_index: usize, until: Instant },
+}
+
+struct ComboState {
+    trigger_down: bool,
+    phase: ComboPhase,
+}
+
+impl Default for ComboState {
+    fn default() -> Self {
+        Self {
+            trigger_down: false,
+            phase: ComboPhase::Idle,
+        }
+    }
+}
+
+#[derive(Default)]
+struct LinkedBindingState {
+    trigger_down: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandSource {
+    Repeat(usize),
+    Combo(usize),
+    Linked(usize),
+}
+
+#[derive(Clone, Copy)]
+struct QueuedCommand {
+    source: CommandSource,
     key: KeySpec,
-    execute_at: Instant,
-    press_duration_ms: u64,
+    ready_at: Instant,
+    press_duration: Duration,
+}
+
+#[derive(Default)]
+struct CommandQueue {
+    pending: Vec<QueuedCommand>,
+}
+
+impl CommandQueue {
+    fn clear(&mut self) {
+        self.pending.clear();
+    }
+
+    fn enqueue(&mut self, command: QueuedCommand) {
+        self.pending.push(command);
+        self.pending.sort_by_key(|item| item.ready_at);
+    }
+
+    fn cancel_source(&mut self, source: CommandSource) {
+        self.pending.retain(|item| item.source != source);
+    }
+
+    fn next_ready_at(&self) -> Option<Instant> {
+        self.pending.iter().map(|item| item.ready_at).min()
+    }
+
+    fn pop_next_ready(&mut self, now: Instant) -> Option<QueuedCommand> {
+        let next_index = self
+            .pending
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.ready_at <= now)
+            .min_by_key(|(_, item)| item.ready_at)
+            .map(|(index, _)| index)?;
+        Some(self.pending.remove(next_index))
+    }
+}
+
+#[derive(Default)]
+struct InputStateTracker {
+    stable_down: HashMap<u16, bool>,
+}
+
+struct InputSnapshot {
+    down: HashMap<u16, bool>,
+}
+
+impl InputStateTracker {
+    fn snapshot(&mut self, monitored_vks: &[u16]) -> InputSnapshot {
+        let mut down = HashMap::with_capacity(monitored_vks.len());
+        for &vk in monitored_vks {
+            let raw_down = is_vk_down(vk);
+            let previous_down = self.stable_down.get(&vk).copied().unwrap_or(false);
+            let effective_down =
+                resolve_effective_key_down(previous_down, raw_down, synthetic_key_is_down(vk));
+            self.stable_down.insert(vk, effective_down);
+            down.insert(vk, effective_down);
+        }
+
+        InputSnapshot { down }
+    }
+}
+
+impl InputSnapshot {
+    fn is_down(&self, vk: u16) -> bool {
+        self.down.get(&vk).copied().unwrap_or(false)
+    }
 }
 
 impl RuntimeProfile {
@@ -243,9 +378,53 @@ fn configured_press_duration(base_ms: u64) -> Duration {
     Duration::from_millis(base_ms.max(1))
 }
 
-fn combo_step_cycle_duration(step: &RuntimeComboStep) -> Duration {
-    configured_press_duration(step.press_duration_ms)
-        + configured_interval_duration(step.interval_ms)
+fn next_combo_step_ready_at(sent_completed_at: Instant, step: &RuntimeComboStep) -> Instant {
+    sent_completed_at + configured_interval_duration(step.interval_ms)
+}
+
+fn resolve_effective_key_down(previous_down: bool, raw_down: bool, synthetic_down: bool) -> bool {
+    if synthetic_down { previous_down } else { raw_down }
+}
+
+fn collect_monitored_vks(
+    keys: &[KeySpec],
+    combos: &[RuntimeCombo],
+    custom_autofires: &[RuntimeCustomAutofire],
+    auto_triggers: &[RuntimeAutoTrigger],
+    linked_keys: &[RuntimeLinkedKey],
+) -> Vec<u16> {
+    let mut monitored = Vec::new();
+    let mut seen = HashSet::new();
+
+    for key in keys {
+        if seen.insert(key.vk) {
+            monitored.push(key.vk);
+        }
+    }
+    for combo in combos {
+        if seen.insert(combo.trigger.vk) {
+            monitored.push(combo.trigger.vk);
+        }
+    }
+    for custom in custom_autofires {
+        if seen.insert(custom.key.vk) {
+            monitored.push(custom.key.vk);
+        }
+    }
+    for trigger in auto_triggers {
+        for spec in &trigger.trigger_hotkey.specs {
+            if seen.insert(spec.vk) {
+                monitored.push(spec.vk);
+            }
+        }
+    }
+    for linked in linked_keys {
+        if seen.insert(linked.trigger_key.vk) {
+            monitored.push(linked.trigger_key.vk);
+        }
+    }
+
+    monitored
 }
 
 fn print_start_summary(runtime: &RuntimeProfile) {
@@ -345,19 +524,23 @@ where
 {
     on_event(RunnerEvent::Started);
     let sleeper = HighPrecisionSleeper::new();
-
-    let mut last_sent_at: HashMap<u16, Instant> = HashMap::new();
-    let mut trigger_states: HashMap<u16, bool> = runtime
+    let mut input_state_tracker = InputStateTracker::default();
+    let repeat_bindings = build_repeat_bindings(&runtime);
+    let mut repeat_states = repeat_bindings
+        .iter()
+        .map(|_| RepeatBindingState::default())
+        .collect::<Vec<_>>();
+    let mut combo_states = runtime
         .combos
         .iter()
-        .map(|combo| (combo.trigger.vk, false))
-        .collect();
-    let mut active_combos: Vec<ActiveCombo> = Vec::new();
-    let mut auto_trigger_hotkey_states = vec![false; runtime.auto_triggers.len()];
-    let mut auto_trigger_enabled = vec![false; runtime.auto_triggers.len()];
-    let mut auto_trigger_last_sent_at = vec![None; runtime.auto_triggers.len()];
-    let mut linked_key_trigger_states = vec![false; runtime.linked_keys.len()];
-    let mut pending_linked_keys: Vec<PendingLinkedKey> = Vec::new();
+        .map(|_| ComboState::default())
+        .collect::<Vec<_>>();
+    let mut linked_states = runtime
+        .linked_keys
+        .iter()
+        .map(|_| LinkedBindingState::default())
+        .collect::<Vec<_>>();
+    let mut command_queue = CommandQueue::default();
     let mut is_active = false;
     let mut ime_blocking = false;
 
@@ -366,16 +549,22 @@ where
             break StopReason::StopRequested;
         }
         let sleep_timing = runtime.sleep_timing_snapshot();
+        let input_snapshot = input_state_tracker.snapshot(&runtime.monitored_vks);
 
-        let title = foreground_window_title();
-        let active_now = is_target_window(&title, &runtime.target_windows);
+        let foreground_window = foreground_window_info();
+        let active_now = foreground_window
+            .as_ref()
+            .is_some_and(|info| info.matches_any_target(&runtime.target_windows));
 
         if active_now != is_active {
             is_active = active_now;
             if !is_active {
-                last_sent_at.clear();
-                active_combos.clear();
-                pending_linked_keys.clear();
+                reset_runtime_states_for_pause(
+                    &repeat_bindings,
+                    &mut repeat_states,
+                    &mut combo_states,
+                    &mut command_queue,
+                );
                 if ime_blocking {
                     ime_blocking = false;
                     on_event(RunnerEvent::ResumedFromIme);
@@ -384,13 +573,19 @@ where
         }
 
         if is_active {
-            let ime_open = foreground_window_ime_open();
+            let ime_open = foreground_window
+                .as_ref()
+                .map(|info| window_ime_open(info.hwnd))
+                .unwrap_or(false);
             if ime_open != ime_blocking {
                 ime_blocking = ime_open;
                 if ime_blocking {
-                    last_sent_at.clear();
-                    active_combos.clear();
-                    pending_linked_keys.clear();
+                    reset_runtime_states_for_pause(
+                        &repeat_bindings,
+                        &mut repeat_states,
+                        &mut combo_states,
+                        &mut command_queue,
+                    );
                     on_event(RunnerEvent::PausedByIme);
                 } else {
                     on_event(RunnerEvent::ResumedFromIme);
@@ -398,79 +593,82 @@ where
             }
 
             if ime_blocking {
-                update_trigger_states(&runtime.combos, &mut trigger_states);
-                update_auto_trigger_states(&runtime.auto_triggers, &mut auto_trigger_hotkey_states);
-                update_linked_key_states(&runtime.linked_keys, &mut linked_key_trigger_states);
+                sync_repeat_binding_inputs(
+                    &repeat_bindings,
+                    &input_snapshot,
+                    &mut repeat_states,
+                );
+                sync_combo_inputs(&runtime.combos, &input_snapshot, &mut combo_states);
+                sync_linked_inputs(
+                    &runtime.linked_keys,
+                    &input_snapshot,
+                    &mut linked_states,
+                );
                 sleeper.sleep_for(effective_poll_duration(sleep_timing));
                 continue;
             }
 
-            trigger_combos(&runtime.combos, &mut trigger_states, &mut active_combos);
-            toggle_auto_triggers(
-                &runtime.auto_triggers,
-                &mut auto_trigger_hotkey_states,
-                &mut auto_trigger_enabled,
-                &mut auto_trigger_last_sent_at,
+            let now = Instant::now();
+            drive_combo_state_machines(
+                &runtime.combos,
+                &input_snapshot,
+                &mut combo_states,
+                &mut command_queue,
+                now,
             );
-            trigger_linked_keys(
+            drive_repeat_state_machines(
+                &repeat_bindings,
+                &input_snapshot,
+                &mut repeat_states,
+                &mut command_queue,
+                now,
+            );
+            drive_linked_bindings(
                 &runtime.linked_keys,
-                &mut linked_key_trigger_states,
-                &mut pending_linked_keys,
+                &input_snapshot,
+                &mut linked_states,
+                &mut command_queue,
+                now,
             );
-            run_due_combo_steps(&mut active_combos, &sleeper);
-            run_due_linked_keys(&mut pending_linked_keys, &sleeper);
-            run_custom_autofires(&runtime.custom_autofires, &mut last_sent_at, &sleeper);
 
-            for key in &runtime.keys {
-                if runtime.combo_trigger_vks.contains(&key.vk)
-                    || runtime.custom_autofire_vks.contains(&key.vk)
-                {
-                    continue;
-                }
-                if !is_vk_down(key.vk) {
-                    last_sent_at.remove(&key.vk);
-                    continue;
-                }
-
-                let should_send = last_sent_at
-                    .get(&key.vk)
-                    .map(|ts| {
-                        ts.elapsed() >= configured_interval_duration(runtime.repeat_interval_ms)
-                    })
-                    .unwrap_or(true);
-                if !should_send {
-                    continue;
-                }
-
-                send_key_once(
-                    *key,
-                    configured_press_duration(runtime.press_duration_ms),
-                    &sleeper,
+            if let Some(command) = command_queue.pop_next_ready(now) {
+                send_key_once(command.key, command.press_duration, &sleeper);
+                on_command_executed(
+                    command,
+                    Instant::now(),
+                    &repeat_bindings,
+                    &mut repeat_states,
+                    &runtime.combos,
+                    &mut combo_states,
                 );
-                last_sent_at.insert(key.vk, Instant::now());
+                continue;
             }
-            run_enabled_auto_triggers(
-                &runtime.auto_triggers,
-                &auto_trigger_enabled,
-                &mut auto_trigger_last_sent_at,
-                &sleeper,
-            );
         } else {
-            update_trigger_states(&runtime.combos, &mut trigger_states);
-            update_auto_trigger_states(&runtime.auto_triggers, &mut auto_trigger_hotkey_states);
-            update_linked_key_states(&runtime.linked_keys, &mut linked_key_trigger_states);
+            reset_runtime_states_for_pause(
+                &repeat_bindings,
+                &mut repeat_states,
+                &mut combo_states,
+                &mut command_queue,
+            );
+            sync_repeat_binding_inputs(
+                &repeat_bindings,
+                &input_snapshot,
+                &mut repeat_states,
+            );
+            sync_combo_inputs(&runtime.combos, &input_snapshot, &mut combo_states);
+            sync_linked_inputs(
+                &runtime.linked_keys,
+                &input_snapshot,
+                &mut linked_states,
+            );
         }
 
         let now = Instant::now();
         let next_poll_at = now + effective_poll_duration(sleep_timing);
         let next_deadline = next_runtime_deadline(
-            &runtime,
-            &active_combos,
-            &pending_linked_keys,
-            &last_sent_at,
-            &auto_trigger_enabled,
-            &auto_trigger_last_sent_at,
-            now,
+            &repeat_states,
+            &combo_states,
+            &command_queue,
         )
         .map(|deadline| deadline.min(next_poll_at))
         .unwrap_or(next_poll_at);
@@ -615,248 +813,333 @@ fn build_runtime_linked_keys(profile: &Profile) -> Result<Vec<RuntimeLinkedKey>>
         .collect()
 }
 
-fn trigger_combos(
+fn build_repeat_bindings(runtime: &RuntimeProfile) -> Vec<RuntimeRepeatBinding> {
+    let combo_trigger_vks = runtime
+        .combos
+        .iter()
+        .map(|combo| combo.trigger.vk)
+        .collect::<HashSet<_>>();
+    let custom_autofire_vks = runtime
+        .custom_autofires
+        .iter()
+        .map(|entry| entry.key.vk)
+        .collect::<HashSet<_>>();
+
+    let mut bindings = Vec::new();
+    bindings.extend(
+        runtime
+            .keys
+            .iter()
+            .filter(|key| {
+                !combo_trigger_vks.contains(&key.vk) && !custom_autofire_vks.contains(&key.vk)
+            })
+            .map(|key| RuntimeRepeatBinding {
+                key: *key,
+                trigger: RepeatTrigger::HoldKey(key.vk),
+                repeat_interval: configured_interval_duration(runtime.repeat_interval_ms),
+                press_duration: configured_press_duration(runtime.press_duration_ms),
+            }),
+    );
+    bindings.extend(runtime.custom_autofires.iter().map(|entry| RuntimeRepeatBinding {
+        key: entry.key,
+        trigger: RepeatTrigger::HoldKey(entry.key.vk),
+        repeat_interval: configured_interval_duration(entry.repeat_interval_ms),
+        press_duration: configured_press_duration(entry.press_duration_ms),
+    }));
+    bindings.extend(runtime.auto_triggers.iter().map(|entry| RuntimeRepeatBinding {
+        key: entry.key,
+        trigger: RepeatTrigger::ToggleHotkey(entry.trigger_hotkey.clone()),
+        repeat_interval: configured_interval_duration(entry.repeat_interval_ms),
+        press_duration: configured_press_duration(entry.press_duration_ms),
+    }));
+
+    bindings
+}
+
+fn drive_repeat_state_machines(
+    repeat_bindings: &[RuntimeRepeatBinding],
+    input_snapshot: &InputSnapshot,
+    repeat_states: &mut [RepeatBindingState],
+    command_queue: &mut CommandQueue,
+    now: Instant,
+) {
+    for (index, binding) in repeat_bindings.iter().enumerate() {
+        let state = &mut repeat_states[index];
+        let source = CommandSource::Repeat(index);
+
+        match &binding.trigger {
+            RepeatTrigger::HoldKey(vk) => {
+                let is_down = input_snapshot.is_down(*vk);
+                state.trigger_down = is_down;
+                state.enabled = is_down;
+                if !state.enabled {
+                    command_queue.cancel_source(source);
+                    state.phase = RepeatPhase::Idle;
+                    continue;
+                }
+            }
+            RepeatTrigger::ToggleHotkey(hotkey) => {
+                let is_down = hotkey_is_down(hotkey, input_snapshot);
+                if is_down && !state.trigger_down {
+                    state.enabled = !state.enabled;
+                    if !state.enabled {
+                        command_queue.cancel_source(source);
+                        state.phase = RepeatPhase::Idle;
+                    }
+                }
+                state.trigger_down = is_down;
+                if !state.enabled {
+                    continue;
+                }
+            }
+        }
+
+        match state.phase {
+            RepeatPhase::Idle => queue_repeat_command(binding, state, command_queue, source, now),
+            RepeatPhase::Recovering { until } if now >= until => {
+                queue_repeat_command(binding, state, command_queue, source, now)
+            }
+            RepeatPhase::Queued | RepeatPhase::Recovering { .. } => {}
+        }
+    }
+}
+
+fn queue_repeat_command(
+    binding: &RuntimeRepeatBinding,
+    state: &mut RepeatBindingState,
+    command_queue: &mut CommandQueue,
+    source: CommandSource,
+    ready_at: Instant,
+) {
+    command_queue.cancel_source(source);
+    command_queue.enqueue(QueuedCommand {
+        source,
+        key: binding.key,
+        ready_at,
+        press_duration: binding.press_duration,
+    });
+    state.phase = RepeatPhase::Queued;
+}
+
+fn sync_repeat_binding_inputs(
+    repeat_bindings: &[RuntimeRepeatBinding],
+    input_snapshot: &InputSnapshot,
+    repeat_states: &mut [RepeatBindingState],
+) {
+    for (binding, state) in repeat_bindings.iter().zip(repeat_states.iter_mut()) {
+        match &binding.trigger {
+            RepeatTrigger::HoldKey(vk) => {
+                state.trigger_down = input_snapshot.is_down(*vk);
+                state.enabled = false;
+                state.phase = RepeatPhase::Idle;
+            }
+            RepeatTrigger::ToggleHotkey(hotkey) => {
+                state.trigger_down = hotkey_is_down(hotkey, input_snapshot);
+                state.phase = RepeatPhase::Idle;
+            }
+        }
+    }
+}
+
+fn drive_combo_state_machines(
     combos: &[RuntimeCombo],
-    trigger_states: &mut HashMap<u16, bool>,
-    active_combos: &mut Vec<ActiveCombo>,
+    input_snapshot: &InputSnapshot,
+    combo_states: &mut [ComboState],
+    command_queue: &mut CommandQueue,
+    now: Instant,
 ) {
-    for combo in combos {
-        let is_down = is_vk_down(combo.trigger.vk);
-        let was_down = trigger_states
-            .get(&combo.trigger.vk)
-            .copied()
-            .unwrap_or(false);
-        if is_down && !was_down {
-            active_combos.retain(|active| active.name != combo.name);
-            active_combos.push(ActiveCombo {
-                name: combo.name.clone(),
-                steps: combo.steps.clone(),
-                next_index: 0,
-                next_at: Instant::now(),
-            });
+    for (index, combo) in combos.iter().enumerate() {
+        let state = &mut combo_states[index];
+        let is_down = input_snapshot.is_down(combo.trigger.vk);
+        if is_down && !state.trigger_down {
+            command_queue.cancel_source(CommandSource::Combo(index));
+            state.phase = ComboPhase::Ready {
+                step_index: 0,
+                ready_at: now,
+            };
         }
-        trigger_states.insert(combo.trigger.vk, is_down);
+        state.trigger_down = is_down;
+        advance_combo_state(combo, state, command_queue, CommandSource::Combo(index), now);
     }
 }
 
-fn run_custom_autofires(
-    custom_autofires: &[RuntimeCustomAutofire],
-    last_sent_at: &mut HashMap<u16, Instant>,
-    sleeper: &HighPrecisionSleeper,
+fn advance_combo_state(
+    combo: &RuntimeCombo,
+    state: &mut ComboState,
+    command_queue: &mut CommandQueue,
+    source: CommandSource,
+    now: Instant,
 ) {
-    for custom in custom_autofires {
-        if !is_vk_down(custom.key.vk) {
-            last_sent_at.remove(&custom.key.vk);
-            continue;
-        }
-
-        let should_send = last_sent_at
-            .get(&custom.key.vk)
-            .map(|ts| ts.elapsed() >= configured_interval_duration(custom.repeat_interval_ms))
-            .unwrap_or(true);
-        if !should_send {
-            continue;
-        }
-
-        send_key_once(
-            custom.key,
-            configured_press_duration(custom.press_duration_ms),
-            sleeper,
-        );
-        last_sent_at.insert(custom.key.vk, Instant::now());
-    }
-}
-
-fn run_due_combo_steps(active_combos: &mut Vec<ActiveCombo>, sleeper: &HighPrecisionSleeper) {
-    let mut completed = Vec::new();
-
-    for (index, combo) in active_combos.iter_mut().enumerate() {
-        while combo.next_index < combo.steps.len() && Instant::now() >= combo.next_at {
-            let step = combo.steps[combo.next_index].clone();
-            send_key_once(
-                step.key,
-                configured_press_duration(step.press_duration_ms),
-                sleeper,
-            );
-            combo.next_index += 1;
-
-            if combo.next_index >= combo.steps.len() {
-                completed.push(index);
+    loop {
+        match state.phase {
+            ComboPhase::Idle | ComboPhase::Queued { .. } => break,
+            ComboPhase::Recovering { next_index, until } => {
+                if now < until {
+                    break;
+                }
+                if next_index >= combo.steps.len() {
+                    state.phase = ComboPhase::Idle;
+                    break;
+                }
+                state.phase = ComboPhase::Ready {
+                    step_index: next_index,
+                    ready_at: now,
+                };
+            }
+            ComboPhase::Ready {
+                step_index,
+                ready_at,
+            } => {
+                if now < ready_at || step_index >= combo.steps.len() {
+                    break;
+                }
+                let step = &combo.steps[step_index];
+                command_queue.cancel_source(source);
+                command_queue.enqueue(QueuedCommand {
+                    source,
+                    key: step.key,
+                    ready_at,
+                    press_duration: configured_press_duration(step.press_duration_ms),
+                });
+                state.phase = ComboPhase::Queued { step_index };
                 break;
             }
-
-            combo.next_at += combo_step_cycle_duration(&step);
         }
-    }
-
-    for index in completed.into_iter().rev() {
-        active_combos.remove(index);
     }
 }
 
-fn toggle_auto_triggers(
-    auto_triggers: &[RuntimeAutoTrigger],
-    trigger_states: &mut [bool],
-    enabled_states: &mut [bool],
-    last_sent_at: &mut [Option<Instant>],
+fn sync_combo_inputs(
+    combos: &[RuntimeCombo],
+    input_snapshot: &InputSnapshot,
+    combo_states: &mut [ComboState],
 ) {
-    for (index, trigger) in auto_triggers.iter().enumerate() {
-        let is_down = hotkey_is_down(&trigger.trigger_hotkey);
-        let was_down = trigger_states.get(index).copied().unwrap_or(false);
-        if is_down && !was_down {
-            enabled_states[index] = !enabled_states[index];
-            if !enabled_states[index] {
-                last_sent_at[index] = None;
-            }
-        }
-        trigger_states[index] = is_down;
+    for (combo, state) in combos.iter().zip(combo_states.iter_mut()) {
+        state.trigger_down = input_snapshot.is_down(combo.trigger.vk);
+        state.phase = ComboPhase::Idle;
     }
 }
 
-fn update_auto_trigger_states(auto_triggers: &[RuntimeAutoTrigger], trigger_states: &mut [bool]) {
-    for (index, trigger) in auto_triggers.iter().enumerate() {
-        trigger_states[index] = hotkey_is_down(&trigger.trigger_hotkey);
-    }
-}
-
-fn run_enabled_auto_triggers(
-    auto_triggers: &[RuntimeAutoTrigger],
-    enabled_states: &[bool],
-    last_sent_at: &mut [Option<Instant>],
-    sleeper: &HighPrecisionSleeper,
-) {
-    for (index, trigger) in auto_triggers.iter().enumerate() {
-        if !enabled_states.get(index).copied().unwrap_or(false) {
-            continue;
-        }
-
-        let should_send = last_sent_at[index]
-            .map(|ts| ts.elapsed() >= configured_interval_duration(trigger.repeat_interval_ms))
-            .unwrap_or(true);
-        if !should_send {
-            continue;
-        }
-
-        send_key_once(
-            trigger.key,
-            configured_press_duration(trigger.press_duration_ms),
-            sleeper,
-        );
-        last_sent_at[index] = Some(Instant::now());
-    }
-}
-
-fn trigger_linked_keys(
+fn drive_linked_bindings(
     linked_keys: &[RuntimeLinkedKey],
-    trigger_states: &mut [bool],
-    pending_linked_keys: &mut Vec<PendingLinkedKey>,
+    input_snapshot: &InputSnapshot,
+    linked_states: &mut [LinkedBindingState],
+    command_queue: &mut CommandQueue,
+    now: Instant,
 ) {
     for (index, linked) in linked_keys.iter().enumerate() {
-        let is_down = is_vk_down(linked.trigger_key.vk);
-        let was_down = trigger_states.get(index).copied().unwrap_or(false);
+        let state = &mut linked_states[index];
+        let is_down = input_snapshot.is_down(linked.trigger_key.vk);
         let should_trigger = match linked.trigger_mode {
-            LinkedTriggerMode::Press => is_down && !was_down,
-            LinkedTriggerMode::Release => !is_down && was_down,
+            LinkedTriggerMode::Press => is_down && !state.trigger_down,
+            LinkedTriggerMode::Release => !is_down && state.trigger_down,
         };
         if should_trigger {
-            pending_linked_keys.push(PendingLinkedKey {
+            command_queue.enqueue(QueuedCommand {
+                source: CommandSource::Linked(index),
                 key: linked.linked_key,
-                execute_at: Instant::now() + configured_interval_duration(linked.interval_ms),
-                press_duration_ms: linked.press_duration_ms,
+                ready_at: now + configured_interval_duration(linked.interval_ms),
+                press_duration: configured_press_duration(linked.press_duration_ms),
             });
         }
-        trigger_states[index] = is_down;
+        state.trigger_down = is_down;
     }
 }
 
-fn update_linked_key_states(linked_keys: &[RuntimeLinkedKey], trigger_states: &mut [bool]) {
-    for (index, linked) in linked_keys.iter().enumerate() {
-        trigger_states[index] = is_vk_down(linked.trigger_key.vk);
-    }
-}
-
-fn run_due_linked_keys(
-    pending_linked_keys: &mut Vec<PendingLinkedKey>,
-    sleeper: &HighPrecisionSleeper,
+fn sync_linked_inputs(
+    linked_keys: &[RuntimeLinkedKey],
+    input_snapshot: &InputSnapshot,
+    linked_states: &mut [LinkedBindingState],
 ) {
-    let now = Instant::now();
-    let mut completed = Vec::new();
-    for (index, pending) in pending_linked_keys.iter().enumerate() {
-        if now < pending.execute_at {
-            continue;
+    for (linked, state) in linked_keys.iter().zip(linked_states.iter_mut()) {
+        state.trigger_down = input_snapshot.is_down(linked.trigger_key.vk);
+    }
+}
+
+fn on_command_executed(
+    command: QueuedCommand,
+    completed_at: Instant,
+    repeat_bindings: &[RuntimeRepeatBinding],
+    repeat_states: &mut [RepeatBindingState],
+    combos: &[RuntimeCombo],
+    combo_states: &mut [ComboState],
+) {
+    match command.source {
+        CommandSource::Repeat(index) => {
+            let Some(state) = repeat_states.get_mut(index) else {
+                return;
+            };
+            let Some(binding) = repeat_bindings.get(index) else {
+                return;
+            };
+            state.phase = RepeatPhase::Recovering {
+                until: completed_at + binding.repeat_interval,
+            };
         }
-        send_key_once(
-            pending.key,
-            configured_press_duration(pending.press_duration_ms),
-            sleeper,
-        );
-        completed.push(index);
+        CommandSource::Combo(index) => {
+            let Some(state) = combo_states.get_mut(index) else {
+                return;
+            };
+            let Some(combo) = combos.get(index) else {
+                return;
+            };
+            let ComboPhase::Queued { step_index } = state.phase else {
+                return;
+            };
+            if step_index + 1 >= combo.steps.len() {
+                state.phase = ComboPhase::Idle;
+            } else {
+                let step = &combo.steps[step_index];
+                state.phase = ComboPhase::Recovering {
+                    next_index: step_index + 1,
+                    until: next_combo_step_ready_at(completed_at, step),
+                };
+            }
+        }
+        CommandSource::Linked(_) => {}
+    }
+}
+
+fn reset_runtime_states_for_pause(
+    repeat_bindings: &[RuntimeRepeatBinding],
+    repeat_states: &mut [RepeatBindingState],
+    combo_states: &mut [ComboState],
+    command_queue: &mut CommandQueue,
+) {
+    command_queue.clear();
+
+    for (binding, state) in repeat_bindings.iter().zip(repeat_states.iter_mut()) {
+        if matches!(binding.trigger, RepeatTrigger::HoldKey(_)) {
+            state.enabled = false;
+        }
+        state.phase = RepeatPhase::Idle;
     }
 
-    for index in completed.into_iter().rev() {
-        pending_linked_keys.remove(index);
+    for state in combo_states {
+        state.phase = ComboPhase::Idle;
     }
 }
 
 fn next_runtime_deadline(
-    runtime: &RuntimeProfile,
-    active_combos: &[ActiveCombo],
-    pending_linked_keys: &[PendingLinkedKey],
-    last_sent_at: &HashMap<u16, Instant>,
-    auto_trigger_enabled: &[bool],
-    auto_trigger_last_sent_at: &[Option<Instant>],
-    now: Instant,
+    repeat_states: &[RepeatBindingState],
+    combo_states: &[ComboState],
+    command_queue: &CommandQueue,
 ) -> Option<Instant> {
-    let mut next_deadline = active_combos
-        .iter()
-        .filter(|combo| combo.next_index < combo.steps.len())
-        .map(|combo| combo.next_at)
-        .min();
+    let mut next_deadline = command_queue.next_ready_at();
 
-    for pending in pending_linked_keys {
-        merge_earlier_deadline(&mut next_deadline, pending.execute_at);
+    for state in repeat_states {
+        if let RepeatPhase::Recovering { until } = state.phase {
+            merge_earlier_deadline(&mut next_deadline, until);
+        }
     }
 
-    for custom in &runtime.custom_autofires {
-        if !is_vk_down(custom.key.vk) {
-            continue;
+    for state in combo_states {
+        match state.phase {
+            ComboPhase::Ready { ready_at, .. } => merge_earlier_deadline(&mut next_deadline, ready_at),
+            ComboPhase::Recovering { until, .. } => {
+                merge_earlier_deadline(&mut next_deadline, until)
+            }
+            ComboPhase::Idle | ComboPhase::Queued { .. } => {}
         }
-
-        let due_at = last_sent_at
-            .get(&custom.key.vk)
-            .map(|ts| *ts + configured_interval_duration(custom.repeat_interval_ms))
-            .unwrap_or(now);
-        merge_earlier_deadline(&mut next_deadline, due_at);
-    }
-
-    for key in &runtime.keys {
-        if runtime.combo_trigger_vks.contains(&key.vk)
-            || runtime.custom_autofire_vks.contains(&key.vk)
-        {
-            continue;
-        }
-        if !is_vk_down(key.vk) {
-            continue;
-        }
-
-        let due_at = last_sent_at
-            .get(&key.vk)
-            .map(|ts| *ts + configured_interval_duration(runtime.repeat_interval_ms))
-            .unwrap_or(now);
-        merge_earlier_deadline(&mut next_deadline, due_at);
-    }
-
-    for (index, trigger) in runtime.auto_triggers.iter().enumerate() {
-        if !auto_trigger_enabled.get(index).copied().unwrap_or(false) {
-            continue;
-        }
-
-        let due_at = auto_trigger_last_sent_at
-            .get(index)
-            .and_then(|ts| *ts)
-            .map(|ts| ts + configured_interval_duration(trigger.repeat_interval_ms))
-            .unwrap_or(now);
-        merge_earlier_deadline(&mut next_deadline, due_at);
     }
 
     next_deadline
@@ -873,14 +1156,11 @@ fn yes_no(value: bool) -> &'static str {
     if value { "on" } else { "off" }
 }
 
-fn update_trigger_states(combos: &[RuntimeCombo], trigger_states: &mut HashMap<u16, bool>) {
-    for combo in combos {
-        trigger_states.insert(combo.trigger.vk, is_vk_down(combo.trigger.vk));
-    }
-}
-
-fn hotkey_is_down(hotkey: &RuntimeHotkey) -> bool {
-    hotkey.specs.iter().all(|spec| is_vk_down(spec.vk))
+fn hotkey_is_down(hotkey: &RuntimeHotkey, input_snapshot: &InputSnapshot) -> bool {
+    hotkey
+        .specs
+        .iter()
+        .all(|spec| input_snapshot.is_down(spec.vk))
 }
 
 fn linked_trigger_mode_label(mode: LinkedTriggerMode) -> &'static str {
@@ -892,12 +1172,18 @@ fn linked_trigger_mode_label(mode: LinkedTriggerMode) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{AutoFireService, RunnerEvent, StopReason};
+    use super::{
+        AutoFireService, ComboPhase, ComboState, CommandQueue, CommandSource, QueuedCommand,
+        RepeatBindingState, RepeatPhase, RuntimeComboStep, RuntimeRepeatBinding, RunnerEvent,
+        StopReason, collect_monitored_vks, next_combo_step_ready_at, on_command_executed,
+        resolve_effective_key_down,
+    };
+    use crate::keymap::parse_single_key;
     use crate::config::{
         ComboConfig, ComboStepConfig, LinkedTriggerMode, Profile, SpecialKeyConfig,
     };
     use std::sync::mpsc::channel;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn worker_can_start_and_stop_without_leaking_thread() {
@@ -991,5 +1277,174 @@ mod tests {
             runtime.linked_keys[0].trigger_mode,
             LinkedTriggerMode::Release
         );
+    }
+
+    #[test]
+    fn synthetic_hold_keeps_previous_physical_state() {
+        assert!(resolve_effective_key_down(true, false, true));
+        assert!(!resolve_effective_key_down(false, true, true));
+    }
+
+    #[test]
+    fn combo_next_step_waits_from_actual_send_completion() {
+        let finished_at = Instant::now();
+        let step = RuntimeComboStep {
+            key: parse_single_key("A").expect("key"),
+            interval_ms: 7,
+            press_duration_ms: 20,
+        };
+
+        let next_at = next_combo_step_ready_at(finished_at, &step);
+        assert_eq!(next_at.duration_since(finished_at), Duration::from_millis(7));
+    }
+
+    #[test]
+    fn monitored_keys_include_all_trigger_sources_without_duplicates() {
+        let key_a = parse_single_key("A").expect("A");
+        let key_b = parse_single_key("B").expect("B");
+        let key_c = parse_single_key("C").expect("C");
+        let key_d = parse_single_key("D").expect("D");
+
+        let monitored = collect_monitored_vks(
+            &[key_a],
+            &[super::RuntimeCombo {
+                name: "combo".to_string(),
+                trigger: key_b,
+                steps: Vec::new(),
+            }],
+            &[super::RuntimeCustomAutofire {
+                name: "custom".to_string(),
+                key: key_c,
+                repeat_interval_ms: 1,
+                press_duration_ms: 1,
+            }],
+            &[super::RuntimeAutoTrigger {
+                name: "auto".to_string(),
+                key: key_d,
+                trigger_hotkey: super::RuntimeHotkey {
+                    text: "LCTRL+A".to_string(),
+                    specs: vec![parse_single_key("LCTRL").expect("ctrl"), key_a],
+                },
+                repeat_interval_ms: 1,
+                press_duration_ms: 1,
+            }],
+            &[super::RuntimeLinkedKey {
+                name: "linked".to_string(),
+                trigger_key: key_b,
+                linked_key: key_d,
+                trigger_mode: LinkedTriggerMode::Press,
+                interval_ms: 1,
+                press_duration_ms: 1,
+            }],
+        );
+
+        assert_eq!(monitored.len(), 4);
+        assert!(monitored.contains(&key_a.vk));
+        assert!(monitored.contains(&key_b.vk));
+        assert!(monitored.contains(&key_c.vk));
+        assert!(monitored.contains(&parse_single_key("LCTRL").expect("ctrl").vk));
+    }
+
+    #[test]
+    fn command_queue_pops_earliest_ready_command_first() {
+        let key_a = parse_single_key("A").expect("A");
+        let key_b = parse_single_key("B").expect("B");
+        let now = Instant::now();
+        let mut queue = CommandQueue::default();
+
+        queue.enqueue(QueuedCommand {
+            source: CommandSource::Linked(0),
+            key: key_b,
+            ready_at: now + Duration::from_millis(10),
+            press_duration: Duration::from_millis(20),
+        });
+        queue.enqueue(QueuedCommand {
+            source: CommandSource::Repeat(0),
+            key: key_a,
+            ready_at: now,
+            press_duration: Duration::from_millis(15),
+        });
+
+        let first = queue.pop_next_ready(now + Duration::from_millis(1));
+        assert!(matches!(
+            first.map(|command| command.source),
+            Some(CommandSource::Repeat(0))
+        ));
+    }
+
+    #[test]
+    fn command_execution_advances_repeat_and_combo_states() {
+        let key_a = parse_single_key("A").expect("A");
+        let completed_at = Instant::now();
+        let combo = super::RuntimeCombo {
+            name: "combo".to_string(),
+            trigger: key_a,
+            steps: vec![
+                RuntimeComboStep {
+                    key: key_a,
+                    interval_ms: 8,
+                    press_duration_ms: 20,
+                },
+                RuntimeComboStep {
+                    key: parse_single_key("B").expect("B"),
+                    interval_ms: 12,
+                    press_duration_ms: 20,
+                },
+            ],
+        };
+        let repeat_binding = RuntimeRepeatBinding {
+            key: key_a,
+            trigger: super::RepeatTrigger::HoldKey(key_a.vk),
+            repeat_interval: Duration::from_millis(10),
+            press_duration: Duration::from_millis(15),
+        };
+        let mut repeat_states = vec![RepeatBindingState {
+            trigger_down: true,
+            enabled: true,
+            phase: RepeatPhase::Queued,
+        }];
+        let mut combo_states = vec![ComboState {
+            trigger_down: false,
+            phase: ComboPhase::Queued { step_index: 0 },
+        }];
+
+        on_command_executed(
+            QueuedCommand {
+                source: CommandSource::Repeat(0),
+                key: key_a,
+                ready_at: completed_at,
+                press_duration: Duration::from_millis(15),
+            },
+            completed_at,
+            &[repeat_binding.clone()],
+            &mut repeat_states,
+            &[combo.clone()],
+            &mut combo_states,
+        );
+        assert!(matches!(
+            repeat_states[0].phase,
+            RepeatPhase::Recovering { until } if until == completed_at + Duration::from_millis(10)
+        ));
+
+        on_command_executed(
+            QueuedCommand {
+                source: CommandSource::Combo(0),
+                key: key_a,
+                ready_at: completed_at,
+                press_duration: Duration::from_millis(20),
+            },
+            completed_at,
+            &[repeat_binding],
+            &mut repeat_states,
+            &[combo],
+            &mut combo_states,
+        );
+        assert!(matches!(
+            combo_states[0].phase,
+            ComboPhase::Recovering {
+                next_index: 1,
+                until
+            } if until == completed_at + Duration::from_millis(8)
+        ));
     }
 }

@@ -67,7 +67,7 @@ cargo run -- config show --profile default
 保存配置：
 
 ```bash
-cargo run -- config save --name my-dnf --keys J,P,L,H --repeat-interval-ms 1 --press-duration-ms 1 --poll-interval-ms 1 --windows 地下城与勇士,DNF
+cargo run -- config save --name my-dnf --keys J,P,L,H --repeat-interval-ms 10 --press-duration-ms 15 --poll-interval-ms 1 --windows 地下城与勇士,DNF
 ```
 
 说明：`--windows` 现在写入全局目标窗口关键字，不再只属于某个配置。
@@ -75,7 +75,7 @@ cargo run -- config save --name my-dnf --keys J,P,L,H --repeat-interval-ms 1 --p
 添加一键连招：
 
 ```bash
-cargo run -- config add-combo --profile my-dnf --name combo1 --trigger-key U --sequence-keys A,S,D,F --step-interval-ms 80 --press-duration-ms 1
+cargo run -- config add-combo --profile my-dnf --name combo1 --trigger-key U --sequence-keys A,S,D,F --step-interval-ms 8 --press-duration-ms 20
 ```
 
 说明：CLI 的 `add-combo` 会把同一个 `step-interval-ms` 应用到所有步骤；GUI 中可以继续把每一步改成独立间隔。
@@ -97,8 +97,8 @@ cargo run -- config delete --name my-dnf
 首次运行如果找不到配置文件，会自动用程序内置的初始化模板生成 `configs.json`。当前内置模板来自项目中的 `configs.json`，默认内容如下：
 
 - `enabled_keys`: `J`, `P`, `L`, `H`
-- `repeat_interval_ms`: `1`
-- `press_duration_ms`: `1`
+- `repeat_interval_ms`: `10`
+- `press_duration_ms`: `15`
 - `poll_interval_ms`: `1`
 - 全局 `target_windows`: `地下城与勇士`, `DNF`
 - 全局 `quick_switch_hotkey`: `LCTRL+BACKQUOTE`
@@ -114,6 +114,11 @@ cargo run -- config delete --name my-dnf
 - `name`: 连招名称
 - `trigger_key`: 触发键，按下一次后执行整套连招
 - `steps`: 按顺序执行的步骤列表，每一步都包含 `key`、`interval_ms` 和 `press_duration_ms`
+
+推荐起步值：
+
+- 普通连发默认基底：`repeat_interval_ms = 10`、`press_duration_ms = 15`
+- 连招步骤默认基底：`interval_ms = 8`、`press_duration_ms = 20`
 
 GUI 中：
 

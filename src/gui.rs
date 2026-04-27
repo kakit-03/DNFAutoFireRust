@@ -1,6 +1,8 @@
 use crate::autofire::{AutoFireService, RunnerEvent, RunnerHandle};
 use crate::config::{
     ComboConfig, ComboStepConfig, ConfigStore, LinkedTriggerMode, Profile, SpecialKeyConfig,
+    DEFAULT_COMBO_STEP_INTERVAL_MS, DEFAULT_COMBO_STEP_PRESS_DURATION_MS,
+    DEFAULT_PRESS_DURATION_MS, DEFAULT_REPEAT_INTERVAL_MS,
 };
 use crate::gui_model::{ProfileDraft, target_windows_from_text, target_windows_to_text};
 use crate::input::is_vk_down;
@@ -11,7 +13,7 @@ use crate::keymap::{
 };
 use crate::single_instance::SingleInstanceGuard;
 use crate::timing::SleepTimingMonitor;
-use crate::win::{foreground_window_is, foreground_window_title, is_target_window};
+use crate::win::{foreground_window_info, foreground_window_is};
 use anyhow::{Context, Result, bail};
 use eframe::egui::{
     self, Align, Align2, Color32, FontData, FontDefinitions, FontFamily, FontId, Key, Layout, Pos2,
@@ -2384,12 +2386,12 @@ impl AppState {
                 .steps
                 .last()
                 .map(|step| step.interval_ms.to_string())
-                .unwrap_or_else(|| "80".to_string());
+                .unwrap_or_else(|| DEFAULT_COMBO_STEP_INTERVAL_MS.to_string());
             let last_step_press = combo
                 .steps
                 .last()
                 .map(|step| step.press_duration_ms.to_string())
-                .unwrap_or_else(|| "1".to_string());
+                .unwrap_or_else(|| DEFAULT_COMBO_STEP_PRESS_DURATION_MS.to_string());
             ComboDialogState {
                 edit_index: Some(index),
                 name: combo.name,
@@ -2416,8 +2418,8 @@ impl AppState {
                 trigger_key: "未录入".to_string(),
                 steps: Vec::new(),
                 selected_step: None,
-                new_step_interval_ms: "80".to_string(),
-                new_step_press_duration_ms: "1".to_string(),
+                new_step_interval_ms: DEFAULT_COMBO_STEP_INTERVAL_MS.to_string(),
+                new_step_press_duration_ms: DEFAULT_COMBO_STEP_PRESS_DURATION_MS.to_string(),
                 capture_target: None,
                 capture_down_keys: HashSet::new(),
             }
@@ -2541,10 +2543,10 @@ impl AppState {
                 linked_trigger_key: "未录入".to_string(),
                 linked_target_key: "未录入".to_string(),
                 linked_trigger_mode: LinkedTriggerMode::Press,
-                repeat_interval_ms: "80".to_string(),
-                press_duration_ms: "1".to_string(),
-                linked_interval_ms: "80".to_string(),
-                linked_press_duration_ms: "1".to_string(),
+                repeat_interval_ms: DEFAULT_REPEAT_INTERVAL_MS.to_string(),
+                press_duration_ms: DEFAULT_PRESS_DURATION_MS.to_string(),
+                linked_interval_ms: DEFAULT_COMBO_STEP_INTERVAL_MS.to_string(),
+                linked_press_duration_ms: DEFAULT_COMBO_STEP_PRESS_DURATION_MS.to_string(),
                 capture_target: None,
                 capture_down_keys: HashSet::new(),
             }
@@ -2814,8 +2816,9 @@ impl QuickSwitchMonitor {
                             continue;
                         }
 
-                        let title = foreground_window_title();
-                        let is_target = is_target_window(&title, &active_config.target_windows);
+                        let is_target = foreground_window_info()
+                            .as_ref()
+                            .is_some_and(|info| info.matches_any_target(&active_config.target_windows));
                         if !is_target {
                             continue;
                         }
@@ -3845,8 +3848,8 @@ fn special_key_dialog_from_config(
             linked_trigger_mode: LinkedTriggerMode::Press,
             repeat_interval_ms: repeat_interval_ms.to_string(),
             press_duration_ms: press_duration_ms.to_string(),
-            linked_interval_ms: "80".to_string(),
-            linked_press_duration_ms: "1".to_string(),
+            linked_interval_ms: DEFAULT_COMBO_STEP_INTERVAL_MS.to_string(),
+            linked_press_duration_ms: DEFAULT_COMBO_STEP_PRESS_DURATION_MS.to_string(),
             capture_target: None,
             capture_down_keys: HashSet::new(),
         },
@@ -3868,8 +3871,8 @@ fn special_key_dialog_from_config(
             linked_trigger_mode: LinkedTriggerMode::Press,
             repeat_interval_ms: repeat_interval_ms.to_string(),
             press_duration_ms: press_duration_ms.to_string(),
-            linked_interval_ms: "80".to_string(),
-            linked_press_duration_ms: "1".to_string(),
+            linked_interval_ms: DEFAULT_COMBO_STEP_INTERVAL_MS.to_string(),
+            linked_press_duration_ms: DEFAULT_COMBO_STEP_PRESS_DURATION_MS.to_string(),
             capture_target: None,
             capture_down_keys: HashSet::new(),
         },
@@ -3890,8 +3893,8 @@ fn special_key_dialog_from_config(
             linked_trigger_key: trigger_key.clone(),
             linked_target_key: linked_key.clone(),
             linked_trigger_mode: *trigger_mode,
-            repeat_interval_ms: "80".to_string(),
-            press_duration_ms: "1".to_string(),
+            repeat_interval_ms: DEFAULT_REPEAT_INTERVAL_MS.to_string(),
+            press_duration_ms: DEFAULT_PRESS_DURATION_MS.to_string(),
             linked_interval_ms: interval_ms.to_string(),
             linked_press_duration_ms: press_duration_ms.to_string(),
             capture_target: None,
