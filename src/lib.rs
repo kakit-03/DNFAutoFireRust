@@ -5,8 +5,7 @@ mod gui;
 mod gui_model;
 mod input;
 mod keymap;
-mod single_instance;
+mod platform;
 mod timing;
-mod win;
 
 pub use cli::run;

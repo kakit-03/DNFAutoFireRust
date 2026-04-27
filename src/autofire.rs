@@ -4,8 +4,8 @@ use crate::input::backend::{
     input_backend_label,
 };
 use crate::keymap::{KeySpec, parse_hotkey, parse_key_specs, parse_single_key};
+use crate::platform::window::{foreground_window_info, window_ime_open};
 use crate::timing::{HighPrecisionSleeper, SleepTimingMonitor, SleepTimingSnapshot};
-use crate::win::{foreground_window_info, window_ime_open};
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::sync::Arc;

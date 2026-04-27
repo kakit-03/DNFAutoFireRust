@@ -14,9 +14,9 @@ use crate::keymap::{
     hotkey_registration, is_modifier_key, normalize_hotkey_text, parse_hotkey, parse_key_specs,
     parse_single_key, sort_hotkey_names, supported_key_names,
 };
-use crate::single_instance::SingleInstanceGuard;
+use crate::platform::single_instance::SingleInstanceGuard;
+use crate::platform::window::{foreground_window_info, foreground_window_is};
 use crate::timing::SleepTimingMonitor;
-use crate::win::{foreground_window_info, foreground_window_is};
 use anyhow::{Context, Result, bail};
 use eframe::egui::{
     self, Align, Align2, Color32, FontData, FontDefinitions, FontFamily, FontId, Key, Layout, Pos2,
