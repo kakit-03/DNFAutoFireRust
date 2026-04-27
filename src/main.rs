@@ -9,6 +9,7 @@ mod gui;
 mod gui_model;
 mod initial_config;
 mod input;
+mod input_backend;
 mod keymap;
 mod single_instance;
 mod timing;
@@ -17,9 +18,9 @@ mod win;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use config::{
-    ComboConfig, ComboStepConfig, ConfigStore, Profile, SpecialKeyConfig,
-    DEFAULT_COMBO_STEP_INTERVAL_MS, DEFAULT_COMBO_STEP_PRESS_DURATION_MS,
-    DEFAULT_POLL_INTERVAL_MS, DEFAULT_PRESS_DURATION_MS, DEFAULT_REPEAT_INTERVAL_MS,
+    ComboConfig, ComboStepConfig, ConfigStore, DEFAULT_COMBO_STEP_INTERVAL_MS,
+    DEFAULT_COMBO_STEP_PRESS_DURATION_MS, DEFAULT_POLL_INTERVAL_MS, DEFAULT_PRESS_DURATION_MS,
+    DEFAULT_REPEAT_INTERVAL_MS, Profile, SpecialKeyConfig,
 };
 use keymap::{normalize_hotkey_text, parse_hotkey, parse_key_specs, parse_single_key};
 use std::path::PathBuf;
@@ -119,7 +120,12 @@ fn run() -> Result<()> {
 
             println!("使用配置: {profile_name}");
             validate_profile_bindings(&profile, &store.quick_switch_hotkey)?;
-            autofire::run(&profile, &store.target_windows)
+            autofire::run_with_backend(
+                &profile,
+                &store.target_windows,
+                store.input_backend,
+                &store.backend_settings,
+            )
         }
         Command::Gui => gui::run(cli.config.clone(), store),
         Command::Config { action } => handle_config_action(&mut store, &cli.config, action),

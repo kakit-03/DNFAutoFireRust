@@ -1,4 +1,5 @@
 use crate::initial_config::INITIAL_CONFIG_JSON;
+use crate::input_backend::{BackendSettings, InputBackendKind};
 use crate::keymap::normalize_hotkey_text;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -73,10 +74,8 @@ impl ComboConfig {
         self.trigger_key = self.trigger_key.trim().to_ascii_uppercase();
         let fallback_interval =
             normalize_ms_or_default(self.step_interval_ms, DEFAULT_COMBO_STEP_INTERVAL_MS);
-        let fallback_press_duration = normalize_ms_or_default(
-            self.press_duration_ms,
-            DEFAULT_COMBO_STEP_PRESS_DURATION_MS,
-        );
+        let fallback_press_duration =
+            normalize_ms_or_default(self.press_duration_ms, DEFAULT_COMBO_STEP_PRESS_DURATION_MS);
 
         if self.steps.is_empty() {
             self.steps = normalize_key_sequence(&self.sequence_keys)
@@ -206,10 +205,7 @@ impl SpecialKeyConfig {
                 trigger_key: trigger_key.trim().to_ascii_uppercase(),
                 linked_key: linked_key.trim().to_ascii_uppercase(),
                 trigger_mode,
-                interval_ms: normalize_ms_or_default(
-                    interval_ms,
-                    DEFAULT_COMBO_STEP_INTERVAL_MS,
-                ),
+                interval_ms: normalize_ms_or_default(interval_ms, DEFAULT_COMBO_STEP_INTERVAL_MS),
                 press_duration_ms: normalize_ms_or_default(
                     press_duration_ms,
                     DEFAULT_COMBO_STEP_PRESS_DURATION_MS,
@@ -385,6 +381,10 @@ pub struct ConfigStore {
     pub target_windows: Vec<String>,
     #[serde(default)]
     pub hide_gui_on_startup: bool,
+    #[serde(default)]
+    pub input_backend: InputBackendKind,
+    #[serde(default)]
+    pub backend_settings: BackendSettings,
     pub profiles: BTreeMap<String, Profile>,
 }
 
@@ -397,6 +397,8 @@ impl Default for ConfigStore {
             quick_switch_hotkey: DEFAULT_QUICK_SWITCH_HOTKEY.to_string(),
             target_windows: default_target_windows(),
             hide_gui_on_startup: false,
+            input_backend: InputBackendKind::default(),
+            backend_settings: BackendSettings::default(),
             profiles,
         }
     }
@@ -616,10 +618,11 @@ fn normalize_special_hotkey_text(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ComboConfig, ComboStepConfig, ConfigStore, LinkedTriggerMode, Profile, SpecialKeyConfig,
-        DEFAULT_COMBO_STEP_INTERVAL_MS, DEFAULT_COMBO_STEP_PRESS_DURATION_MS,
-        DEFAULT_POLL_INTERVAL_MS, DEFAULT_PRESS_DURATION_MS, DEFAULT_REPEAT_INTERVAL_MS,
+        ComboConfig, ComboStepConfig, ConfigStore, DEFAULT_COMBO_STEP_INTERVAL_MS,
+        DEFAULT_COMBO_STEP_PRESS_DURATION_MS, DEFAULT_POLL_INTERVAL_MS, DEFAULT_PRESS_DURATION_MS,
+        DEFAULT_REPEAT_INTERVAL_MS, LinkedTriggerMode, Profile, SpecialKeyConfig,
     };
+    use crate::input_backend::InputBackendKind;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -818,6 +821,42 @@ mod tests {
         assert_eq!(combo.step_interval_ms, 0);
         assert_eq!(normalized.quick_switch_hotkey, "LALT+Q");
         assert_eq!(normalized.target_windows, vec!["DNF"]);
+        assert_eq!(normalized.input_backend, InputBackendKind::SendInputPolling);
+        assert!(normalized.backend_settings.is_empty());
+    }
+
+    #[test]
+    fn store_serializes_input_backend_selection() {
+        let raw = r#"{
+          "default_profile": "default",
+          "quick_switch_hotkey": "LALT+Q",
+          "target_windows": ["DNF"],
+          "hide_gui_on_startup": false,
+          "input_backend": "message_backend",
+          "backend_settings": {
+            "message_backend": {
+              "mode": "compat"
+            }
+          },
+          "profiles": {
+            "default": {
+              "enabled_keys": ["J"],
+              "repeat_interval_ms": 1,
+              "press_duration_ms": 1,
+              "poll_interval_ms": 1,
+              "combos": [],
+              "special_keys": []
+            }
+          }
+        }"#;
+
+        let store: ConfigStore = serde_json::from_str(raw).expect("config json");
+
+        assert_eq!(store.input_backend, InputBackendKind::MessageBackend);
+        assert!(store.backend_settings.contains_key("message_backend"));
+
+        let saved = serde_json::to_string(&store).expect("serialize config");
+        assert!(saved.contains(r#""input_backend":"message_backend""#));
     }
 
     #[test]
@@ -936,6 +975,8 @@ mod tests {
         assert_eq!(store.default_profile, "默认配置");
         assert_eq!(store.quick_switch_hotkey, "LALT+BACKQUOTE");
         assert!(!store.hide_gui_on_startup);
+        assert_eq!(store.input_backend, InputBackendKind::SendInputPolling);
+        assert!(store.backend_settings.is_empty());
         assert!(
             store.profiles.contains_key("默认配置"),
             "expected embedded template profile to exist"

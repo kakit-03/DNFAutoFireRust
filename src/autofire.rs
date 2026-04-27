@@ -1,10 +1,13 @@
 use crate::config::{ComboStepConfig, LinkedTriggerMode, Profile, SpecialKeyConfig};
-use crate::input::{is_vk_down, send_key_once, synthetic_key_is_down};
+use crate::input_backend::{
+    BackendSettings, InputBackend, InputBackendKind, InputSnapshot, create_input_backend,
+    input_backend_label,
+};
 use crate::keymap::{KeySpec, parse_hotkey, parse_key_specs, parse_single_key};
 use crate::timing::{HighPrecisionSleeper, SleepTimingMonitor, SleepTimingSnapshot};
 use crate::win::{foreground_window_info, window_ime_open};
 use anyhow::{Context, Result};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
@@ -39,14 +42,47 @@ impl AutoFireService {
     where
         F: Fn(RunnerEvent) + Send + 'static,
     {
-        let runtime = RuntimeProfile::from_profile(&profile, &target_windows)?;
+        Self::start_with_backend_events(
+            profile,
+            target_windows,
+            InputBackendKind::default(),
+            BackendSettings::default(),
+            on_event,
+        )
+    }
+
+    pub fn start_with_backend_events<F>(
+        profile: Profile,
+        target_windows: Vec<String>,
+        input_backend: InputBackendKind,
+        backend_settings: BackendSettings,
+        on_event: F,
+    ) -> Result<RunnerHandle>
+    where
+        F: Fn(RunnerEvent) + Send + 'static,
+    {
+        let runtime =
+            RuntimeProfile::from_profile_with_backend(&profile, &target_windows, input_backend)?;
+        let backend = create_input_backend(input_backend, &backend_settings)?;
+        backend.health_check()?;
+        let capabilities = backend.capabilities();
+        if !capabilities.reads_physical_state
+            || !capabilities.sends_keyboard_events
+            || !capabilities.supports_hold_repeat
+            || !capabilities.supports_combo_sequence
+        {
+            return Err(anyhow::anyhow!(
+                "input backend '{}' does not support the required autofire capabilities",
+                input_backend_label(input_backend)
+            ));
+        }
         let stop_requested = Arc::new(AtomicBool::new(false));
         let running = Arc::new(AtomicBool::new(true));
 
         let stop_for_thread = Arc::clone(&stop_requested);
         let running_for_thread = Arc::clone(&running);
         let join = thread::spawn(move || {
-            let result = run_loop(runtime, stop_for_thread, on_event);
+            let result = run_loop(runtime, backend, stop_for_thread, on_event);
             running_for_thread.store(false, Ordering::SeqCst);
             result
         });
@@ -95,19 +131,39 @@ impl Drop for RunnerHandle {
     }
 }
 
+#[allow(dead_code)]
 pub fn run(profile: &Profile, target_windows: &[String]) -> Result<()> {
-    let runtime = RuntimeProfile::from_profile(profile, target_windows)?;
+    let settings = BackendSettings::default();
+    run_with_backend(
+        profile,
+        target_windows,
+        InputBackendKind::default(),
+        &settings,
+    )
+}
+
+pub fn run_with_backend(
+    profile: &Profile,
+    target_windows: &[String],
+    input_backend: InputBackendKind,
+    backend_settings: &BackendSettings,
+) -> Result<()> {
+    let runtime =
+        RuntimeProfile::from_profile_with_backend(profile, target_windows, input_backend)?;
     print_start_summary(&runtime);
 
-    let mut handle =
-        AutoFireService::start_with_events(profile.clone(), target_windows.to_vec(), |event| {
-            match event {
-                RunnerEvent::Started => {}
-                RunnerEvent::PausedByIme => println!("检测到输入法开启，暂停连发。"),
-                RunnerEvent::ResumedFromIme => println!("输入法关闭，恢复连发。"),
-                RunnerEvent::Stopped(StopReason::StopRequested) => println!("连发已停止。"),
-            }
-        })?;
+    let mut handle = AutoFireService::start_with_backend_events(
+        profile.clone(),
+        target_windows.to_vec(),
+        input_backend,
+        backend_settings.clone(),
+        |event| match event {
+            RunnerEvent::Started => {}
+            RunnerEvent::PausedByIme => println!("检测到输入法开启，暂停连发。"),
+            RunnerEvent::ResumedFromIme => println!("输入法关闭，恢复连发。"),
+            RunnerEvent::Stopped(StopReason::StopRequested) => println!("连发已停止。"),
+        },
+    )?;
 
     handle.wait()
 }
@@ -123,11 +179,21 @@ struct RuntimeProfile {
     repeat_interval_ms: u64,
     press_duration_ms: u64,
     target_windows: Vec<String>,
+    input_backend: InputBackendKind,
     sleep_timing: SleepTimingMonitor,
 }
 
 impl RuntimeProfile {
+    #[cfg(test)]
     fn from_profile(profile: &Profile, target_windows: &[String]) -> Result<Self> {
+        Self::from_profile_with_backend(profile, target_windows, InputBackendKind::default())
+    }
+
+    fn from_profile_with_backend(
+        profile: &Profile,
+        target_windows: &[String],
+        input_backend: InputBackendKind,
+    ) -> Result<Self> {
         profile.validate()?;
         if target_windows.is_empty() {
             return Err(anyhow::anyhow!("target_windows cannot be empty"));
@@ -163,6 +229,7 @@ impl RuntimeProfile {
             repeat_interval_ms: profile.repeat_interval_ms.max(1),
             press_duration_ms: profile.press_duration_ms.max(1),
             target_windows: target_windows.to_vec(),
+            input_backend,
             sleep_timing: SleepTimingMonitor::shared(),
         })
     }
@@ -255,9 +322,17 @@ impl Default for RepeatBindingState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ComboPhase {
     Idle,
-    Ready { step_index: usize, ready_at: Instant },
-    Queued { step_index: usize },
-    Recovering { next_index: usize, until: Instant },
+    Ready {
+        step_index: usize,
+        ready_at: Instant,
+    },
+    Queued {
+        step_index: usize,
+    },
+    Recovering {
+        next_index: usize,
+        until: Instant,
+    },
 }
 
 struct ComboState {
@@ -329,37 +404,6 @@ impl CommandQueue {
     }
 }
 
-#[derive(Default)]
-struct InputStateTracker {
-    stable_down: HashMap<u16, bool>,
-}
-
-struct InputSnapshot {
-    down: HashMap<u16, bool>,
-}
-
-impl InputStateTracker {
-    fn snapshot(&mut self, monitored_vks: &[u16]) -> InputSnapshot {
-        let mut down = HashMap::with_capacity(monitored_vks.len());
-        for &vk in monitored_vks {
-            let raw_down = is_vk_down(vk);
-            let previous_down = self.stable_down.get(&vk).copied().unwrap_or(false);
-            let effective_down =
-                resolve_effective_key_down(previous_down, raw_down, synthetic_key_is_down(vk));
-            self.stable_down.insert(vk, effective_down);
-            down.insert(vk, effective_down);
-        }
-
-        InputSnapshot { down }
-    }
-}
-
-impl InputSnapshot {
-    fn is_down(&self, vk: u16) -> bool {
-        self.down.get(&vk).copied().unwrap_or(false)
-    }
-}
-
 impl RuntimeProfile {
     fn sleep_timing_snapshot(&self) -> SleepTimingSnapshot {
         self.sleep_timing.snapshot()
@@ -380,10 +424,6 @@ fn configured_press_duration(base_ms: u64) -> Duration {
 
 fn next_combo_step_ready_at(sent_completed_at: Instant, step: &RuntimeComboStep) -> Instant {
     sent_completed_at + configured_interval_duration(step.interval_ms)
-}
-
-fn resolve_effective_key_down(previous_down: bool, raw_down: bool, synthetic_down: bool) -> bool {
-    if synthetic_down { previous_down } else { raw_down }
 }
 
 fn collect_monitored_vks(
@@ -442,6 +482,7 @@ fn print_start_summary(runtime: &RuntimeProfile) {
         timing.scheduler_interval_ms,
         timing.measured_granularity_ms
     );
+    println!("输入后端: {}", input_backend_label(runtime.input_backend));
     println!(
         "高精度定时: timer_resolution={}, hidden_window_fix={}, high_res_waitable_timer={}",
         yes_no(timing.timer_resolution_requested),
@@ -518,13 +559,17 @@ fn print_start_summary(runtime: &RuntimeProfile) {
     println!("按住配置中的按键触发连发。");
 }
 
-fn run_loop<F>(runtime: RuntimeProfile, stop_requested: Arc<AtomicBool>, on_event: F) -> Result<()>
+fn run_loop<F>(
+    runtime: RuntimeProfile,
+    mut input_backend: Box<dyn InputBackend>,
+    stop_requested: Arc<AtomicBool>,
+    on_event: F,
+) -> Result<()>
 where
     F: Fn(RunnerEvent),
 {
     on_event(RunnerEvent::Started);
     let sleeper = HighPrecisionSleeper::new();
-    let mut input_state_tracker = InputStateTracker::default();
     let repeat_bindings = build_repeat_bindings(&runtime);
     let mut repeat_states = repeat_bindings
         .iter()
@@ -549,7 +594,7 @@ where
             break StopReason::StopRequested;
         }
         let sleep_timing = runtime.sleep_timing_snapshot();
-        let input_snapshot = input_state_tracker.snapshot(&runtime.monitored_vks);
+        let input_snapshot = input_backend.snapshot(&runtime.monitored_vks);
 
         let foreground_window = foreground_window_info();
         let active_now = foreground_window
@@ -593,17 +638,9 @@ where
             }
 
             if ime_blocking {
-                sync_repeat_binding_inputs(
-                    &repeat_bindings,
-                    &input_snapshot,
-                    &mut repeat_states,
-                );
+                sync_repeat_binding_inputs(&repeat_bindings, &input_snapshot, &mut repeat_states);
                 sync_combo_inputs(&runtime.combos, &input_snapshot, &mut combo_states);
-                sync_linked_inputs(
-                    &runtime.linked_keys,
-                    &input_snapshot,
-                    &mut linked_states,
-                );
+                sync_linked_inputs(&runtime.linked_keys, &input_snapshot, &mut linked_states);
                 sleeper.sleep_for(effective_poll_duration(sleep_timing));
                 continue;
             }
@@ -632,10 +669,10 @@ where
             );
 
             if let Some(command) = command_queue.pop_next_ready(now) {
-                send_key_once(command.key, command.press_duration, &sleeper);
-                on_command_executed(
+                execute_ready_command(
                     command,
-                    Instant::now(),
+                    input_backend.as_mut(),
+                    &sleeper,
                     &repeat_bindings,
                     &mut repeat_states,
                     &runtime.combos,
@@ -650,33 +687,41 @@ where
                 &mut combo_states,
                 &mut command_queue,
             );
-            sync_repeat_binding_inputs(
-                &repeat_bindings,
-                &input_snapshot,
-                &mut repeat_states,
-            );
+            sync_repeat_binding_inputs(&repeat_bindings, &input_snapshot, &mut repeat_states);
             sync_combo_inputs(&runtime.combos, &input_snapshot, &mut combo_states);
-            sync_linked_inputs(
-                &runtime.linked_keys,
-                &input_snapshot,
-                &mut linked_states,
-            );
+            sync_linked_inputs(&runtime.linked_keys, &input_snapshot, &mut linked_states);
         }
 
         let now = Instant::now();
         let next_poll_at = now + effective_poll_duration(sleep_timing);
-        let next_deadline = next_runtime_deadline(
-            &repeat_states,
-            &combo_states,
-            &command_queue,
-        )
-        .map(|deadline| deadline.min(next_poll_at))
-        .unwrap_or(next_poll_at);
+        let next_deadline = next_runtime_deadline(&repeat_states, &combo_states, &command_queue)
+            .map(|deadline| deadline.min(next_poll_at))
+            .unwrap_or(next_poll_at);
         sleeper.sleep_until(next_deadline);
     };
 
     on_event(RunnerEvent::Stopped(stop_reason));
     Ok(())
+}
+
+fn execute_ready_command(
+    command: QueuedCommand,
+    input_backend: &mut dyn InputBackend,
+    sleeper: &HighPrecisionSleeper,
+    repeat_bindings: &[RuntimeRepeatBinding],
+    repeat_states: &mut [RepeatBindingState],
+    combos: &[RuntimeCombo],
+    combo_states: &mut [ComboState],
+) {
+    input_backend.send_key_once(command.key, command.press_duration, sleeper);
+    on_command_executed(
+        command,
+        Instant::now(),
+        repeat_bindings,
+        repeat_states,
+        combos,
+        combo_states,
+    );
 }
 
 fn build_runtime_combos(profile: &Profile) -> Result<Vec<RuntimeCombo>> {
@@ -840,18 +885,28 @@ fn build_repeat_bindings(runtime: &RuntimeProfile) -> Vec<RuntimeRepeatBinding> 
                 press_duration: configured_press_duration(runtime.press_duration_ms),
             }),
     );
-    bindings.extend(runtime.custom_autofires.iter().map(|entry| RuntimeRepeatBinding {
-        key: entry.key,
-        trigger: RepeatTrigger::HoldKey(entry.key.vk),
-        repeat_interval: configured_interval_duration(entry.repeat_interval_ms),
-        press_duration: configured_press_duration(entry.press_duration_ms),
-    }));
-    bindings.extend(runtime.auto_triggers.iter().map(|entry| RuntimeRepeatBinding {
-        key: entry.key,
-        trigger: RepeatTrigger::ToggleHotkey(entry.trigger_hotkey.clone()),
-        repeat_interval: configured_interval_duration(entry.repeat_interval_ms),
-        press_duration: configured_press_duration(entry.press_duration_ms),
-    }));
+    bindings.extend(
+        runtime
+            .custom_autofires
+            .iter()
+            .map(|entry| RuntimeRepeatBinding {
+                key: entry.key,
+                trigger: RepeatTrigger::HoldKey(entry.key.vk),
+                repeat_interval: configured_interval_duration(entry.repeat_interval_ms),
+                press_duration: configured_press_duration(entry.press_duration_ms),
+            }),
+    );
+    bindings.extend(
+        runtime
+            .auto_triggers
+            .iter()
+            .map(|entry| RuntimeRepeatBinding {
+                key: entry.key,
+                trigger: RepeatTrigger::ToggleHotkey(entry.trigger_hotkey.clone()),
+                repeat_interval: configured_interval_duration(entry.repeat_interval_ms),
+                press_duration: configured_press_duration(entry.press_duration_ms),
+            }),
+    );
 
     bindings
 }
@@ -959,7 +1014,13 @@ fn drive_combo_state_machines(
             };
         }
         state.trigger_down = is_down;
-        advance_combo_state(combo, state, command_queue, CommandSource::Combo(index), now);
+        advance_combo_state(
+            combo,
+            state,
+            command_queue,
+            CommandSource::Combo(index),
+            now,
+        );
     }
 }
 
@@ -1134,7 +1195,9 @@ fn next_runtime_deadline(
 
     for state in combo_states {
         match state.phase {
-            ComboPhase::Ready { ready_at, .. } => merge_earlier_deadline(&mut next_deadline, ready_at),
+            ComboPhase::Ready { ready_at, .. } => {
+                merge_earlier_deadline(&mut next_deadline, ready_at)
+            }
             ComboPhase::Recovering { until, .. } => {
                 merge_earlier_deadline(&mut next_deadline, until)
             }
@@ -1174,16 +1237,54 @@ fn linked_trigger_mode_label(mode: LinkedTriggerMode) -> &'static str {
 mod tests {
     use super::{
         AutoFireService, ComboPhase, ComboState, CommandQueue, CommandSource, QueuedCommand,
-        RepeatBindingState, RepeatPhase, RuntimeComboStep, RuntimeRepeatBinding, RunnerEvent,
-        StopReason, collect_monitored_vks, next_combo_step_ready_at, on_command_executed,
-        resolve_effective_key_down,
+        RepeatBindingState, RepeatPhase, RunnerEvent, RuntimeComboStep, RuntimeRepeatBinding,
+        StopReason, collect_monitored_vks, execute_ready_command, next_combo_step_ready_at,
+        on_command_executed,
     };
-    use crate::keymap::parse_single_key;
     use crate::config::{
         ComboConfig, ComboStepConfig, LinkedTriggerMode, Profile, SpecialKeyConfig,
     };
+    use crate::input_backend::{
+        InputBackend, InputBackendCapabilities, InputSnapshot, resolve_effective_key_down,
+    };
+    use crate::keymap::{KeySpec, parse_single_key};
+    use crate::timing::HighPrecisionSleeper;
+    use anyhow::Result;
     use std::sync::mpsc::channel;
     use std::time::{Duration, Instant};
+
+    #[derive(Default)]
+    struct FakeInputBackend {
+        sent: Vec<(KeySpec, Duration)>,
+    }
+
+    impl InputBackend for FakeInputBackend {
+        fn snapshot(&mut self, _monitored_vks: &[u16]) -> InputSnapshot {
+            InputSnapshot::default()
+        }
+
+        fn send_key_once(
+            &mut self,
+            key: KeySpec,
+            press_duration: Duration,
+            _sleeper: &HighPrecisionSleeper,
+        ) {
+            self.sent.push((key, press_duration));
+        }
+
+        fn capabilities(&self) -> InputBackendCapabilities {
+            InputBackendCapabilities {
+                reads_physical_state: true,
+                sends_keyboard_events: true,
+                supports_hold_repeat: true,
+                supports_combo_sequence: true,
+            }
+        }
+
+        fn health_check(&self) -> Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn worker_can_start_and_stop_without_leaking_thread() {
@@ -1295,7 +1396,10 @@ mod tests {
         };
 
         let next_at = next_combo_step_ready_at(finished_at, &step);
-        assert_eq!(next_at.duration_since(finished_at), Duration::from_millis(7));
+        assert_eq!(
+            next_at.duration_since(finished_at),
+            Duration::from_millis(7)
+        );
     }
 
     #[test]
@@ -1446,5 +1550,81 @@ mod tests {
                 until
             } if until == completed_at + Duration::from_millis(8)
         ));
+    }
+
+    #[test]
+    fn ready_commands_are_sent_through_input_backend() {
+        let key_a = parse_single_key("A").expect("A");
+        let key_b = parse_single_key("B").expect("B");
+        let sleeper = HighPrecisionSleeper::new();
+        let mut backend = FakeInputBackend::default();
+        let repeat_binding = RuntimeRepeatBinding {
+            key: key_a,
+            trigger: super::RepeatTrigger::HoldKey(key_a.vk),
+            repeat_interval: Duration::from_millis(10),
+            press_duration: Duration::from_millis(1),
+        };
+        let combo = super::RuntimeCombo {
+            name: "combo".to_string(),
+            trigger: key_a,
+            steps: vec![
+                RuntimeComboStep {
+                    key: key_a,
+                    interval_ms: 8,
+                    press_duration_ms: 1,
+                },
+                RuntimeComboStep {
+                    key: key_b,
+                    interval_ms: 8,
+                    press_duration_ms: 1,
+                },
+            ],
+        };
+        let mut repeat_states = vec![RepeatBindingState {
+            trigger_down: true,
+            enabled: true,
+            phase: RepeatPhase::Queued,
+        }];
+        let mut combo_states = vec![ComboState {
+            trigger_down: true,
+            phase: ComboPhase::Queued { step_index: 0 },
+        }];
+        let now = Instant::now();
+
+        for command in [
+            QueuedCommand {
+                source: CommandSource::Repeat(0),
+                key: key_a,
+                ready_at: now,
+                press_duration: Duration::from_millis(1),
+            },
+            QueuedCommand {
+                source: CommandSource::Combo(0),
+                key: key_b,
+                ready_at: now,
+                press_duration: Duration::from_millis(2),
+            },
+            QueuedCommand {
+                source: CommandSource::Linked(0),
+                key: key_a,
+                ready_at: now,
+                press_duration: Duration::from_millis(3),
+            },
+        ] {
+            execute_ready_command(
+                command,
+                &mut backend,
+                &sleeper,
+                &[repeat_binding.clone()],
+                &mut repeat_states,
+                &[combo.clone()],
+                &mut combo_states,
+            );
+        }
+
+        assert_eq!(backend.sent.len(), 3);
+        assert_eq!(backend.sent[0], (key_a, Duration::from_millis(1)));
+        assert_eq!(backend.sent[1], (key_b, Duration::from_millis(2)));
+        assert_eq!(backend.sent[2], (key_a, Duration::from_millis(3)));
     }
 }

@@ -6,6 +6,8 @@ pub const INITIAL_CONFIG_JSON: &str = r#"{
     "DNF"
   ],
   "hide_gui_on_startup": false,
+  "input_backend": "send_input_polling",
+  "backend_settings": {},
   "profiles": {
     "默认配置": {
       "enabled_keys": [

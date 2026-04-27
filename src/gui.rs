@@ -1,11 +1,14 @@
 use crate::autofire::{AutoFireService, RunnerEvent, RunnerHandle};
 use crate::config::{
-    ComboConfig, ComboStepConfig, ConfigStore, LinkedTriggerMode, Profile, SpecialKeyConfig,
-    DEFAULT_COMBO_STEP_INTERVAL_MS, DEFAULT_COMBO_STEP_PRESS_DURATION_MS,
-    DEFAULT_PRESS_DURATION_MS, DEFAULT_REPEAT_INTERVAL_MS,
+    ComboConfig, ComboStepConfig, ConfigStore, DEFAULT_COMBO_STEP_INTERVAL_MS,
+    DEFAULT_COMBO_STEP_PRESS_DURATION_MS, DEFAULT_PRESS_DURATION_MS, DEFAULT_REPEAT_INTERVAL_MS,
+    LinkedTriggerMode, Profile, SpecialKeyConfig,
 };
 use crate::gui_model::{ProfileDraft, target_windows_from_text, target_windows_to_text};
 use crate::input::is_vk_down;
+use crate::input_backend::{
+    InputBackendKind, input_backend_descriptor, input_backend_descriptors, input_backend_label,
+};
 use crate::keymap::{
     HotkeyRegistration, display_hotkey_names, display_hotkey_text, display_key_name,
     hotkey_registration, is_modifier_key, normalize_hotkey_text, parse_hotkey, parse_key_specs,
@@ -819,10 +822,67 @@ impl EguiApp {
                                 .size(12.5)
                                 .color(Color32::from_rgb(95, 100, 110)),
                         );
+
+                        ui.add_space(12.0);
+                        ui.strong("输入后端");
+                        ui.add_space(6.0);
+                        self.render_input_backend_selector(ui, editable);
                     });
                 },
             );
         });
+    }
+
+    fn render_input_backend_selector(&mut self, ui: &mut egui::Ui, editable: bool) {
+        let current = self.state.store.input_backend;
+        let mut selected = None;
+        let current_descriptor = input_backend_descriptor(current);
+
+        ui.add_enabled_ui(editable, |ui| {
+            egui::ComboBox::from_id_salt("input_backend_selector")
+                .selected_text(input_backend_label(current))
+                .width(ui.available_width().min(280.0))
+                .show_ui(ui, |ui| {
+                    for descriptor in input_backend_descriptors() {
+                        let response = ui.add_enabled(
+                            descriptor.available,
+                            egui::Button::new(descriptor.label)
+                                .selected(current == descriptor.kind)
+                                .min_size(Vec2::new(ui.available_width(), 26.0)),
+                        );
+                        let response = if let Some(reason) = descriptor.unavailable_reason {
+                            response.on_hover_text(reason)
+                        } else {
+                            response.on_hover_text(descriptor.description)
+                        };
+                        if response.clicked() {
+                            selected = Some(descriptor.kind);
+                        }
+                    }
+                });
+        });
+
+        if let Some(kind) = selected
+            && let Err(err) = self.state.set_input_backend(kind)
+        {
+            self.show_error(&format!("{err:#}"));
+        }
+
+        ui.label(
+            RichText::new(current_descriptor.description)
+                .size(12.5)
+                .color(Color32::from_rgb(95, 100, 110)),
+        );
+        if let Some(reason) = current_descriptor.unavailable_reason {
+            ui.colored_label(Color32::from_rgb(170, 55, 55), reason);
+        }
+        if !editable {
+            ui.label(
+                RichText::new("连发运行中，停止后可切换输入后端。")
+                    .size(12.5)
+                    .color(Color32::from_rgb(95, 100, 110)),
+            );
+        }
     }
 
     fn render_other_panel(&mut self, ui: &mut egui::Ui) {
@@ -2144,13 +2204,20 @@ impl AppState {
         let draft = self.build_draft_from_form();
         let (_, profile) = self.validate_draft(&draft)?;
         let target_windows = self.current_target_windows()?;
+        let input_backend = self.store.input_backend;
+        let backend_settings = self.store.backend_settings.clone();
         let tx = event_tx.clone();
         let repaint_ctx = ctx.clone();
-        let mut handle =
-            AutoFireService::start_with_events(profile, target_windows, move |event| {
+        let mut handle = AutoFireService::start_with_backend_events(
+            profile,
+            target_windows,
+            input_backend,
+            backend_settings,
+            move |event| {
                 let _ = tx.send(AppEvent::Runner(event));
                 repaint_ctx.request_repaint();
-            })?;
+            },
+        )?;
         if let Err(err) = self.remember_last_started_profile() {
             handle.stop();
             let _ = handle.wait();
@@ -2222,6 +2289,23 @@ impl AppState {
     fn persist_global_target_windows(&mut self) -> Result<()> {
         let target_windows = self.current_target_windows()?;
         self.store.target_windows = target_windows;
+        self.store.save(&self.config_path)?;
+        Ok(())
+    }
+
+    fn set_input_backend(&mut self, input_backend: InputBackendKind) -> Result<()> {
+        let descriptor = input_backend_descriptor(input_backend);
+        if !descriptor.available {
+            bail!(
+                "输入后端 '{}' 暂不可用: {}",
+                descriptor.label,
+                descriptor
+                    .unavailable_reason
+                    .unwrap_or("当前版本尚未实现该后端")
+            );
+        }
+
+        self.store.input_backend = input_backend;
         self.store.save(&self.config_path)?;
         Ok(())
     }
@@ -2816,9 +2900,9 @@ impl QuickSwitchMonitor {
                             continue;
                         }
 
-                        let is_target = foreground_window_info()
-                            .as_ref()
-                            .is_some_and(|info| info.matches_any_target(&active_config.target_windows));
+                        let is_target = foreground_window_info().as_ref().is_some_and(|info| {
+                            info.matches_any_target(&active_config.target_windows)
+                        });
                         if !is_target {
                             continue;
                         }
@@ -4012,6 +4096,7 @@ mod tests {
         SpecialKeyType,
     };
     use crate::config::{ConfigStore, LinkedTriggerMode, SpecialKeyConfig};
+    use crate::input_backend::InputBackendKind;
     use std::collections::HashSet;
     use std::fs;
     use std::path::PathBuf;
@@ -4241,6 +4326,27 @@ mod tests {
 
         let saved = ConfigStore::load_or_create(&path).expect("load saved config");
         assert_eq!(saved.target_windows, vec!["地下城与勇士", "DNF"]);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn input_backend_selection_persists_and_rejects_unavailable_backends() {
+        let path = unique_test_config_path();
+        let mut state = AppState::new(path.clone(), ConfigStore::default());
+        state.setup_initial_state().expect("setup initial state");
+
+        state
+            .set_input_backend(InputBackendKind::SendInputPolling)
+            .expect("default backend should be selectable");
+        assert!(
+            state
+                .set_input_backend(InputBackendKind::MessageBackend)
+                .is_err()
+        );
+
+        let saved = ConfigStore::load_or_create(&path).expect("load saved config");
+        assert_eq!(saved.input_backend, InputBackendKind::SendInputPolling);
 
         let _ = fs::remove_file(path);
     }
