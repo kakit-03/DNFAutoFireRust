@@ -15,7 +15,6 @@ use crate::keymap::{
     parse_single_key, sort_hotkey_names, supported_key_names,
 };
 use crate::platform::single_instance::SingleInstanceGuard;
-use crate::platform::window::{foreground_window_info, foreground_window_is};
 use crate::timing::SleepTimingMonitor;
 use anyhow::{Context, Result, bail};
 use eframe::egui::{
@@ -28,24 +27,21 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle, sleep};
+use std::thread::JoinHandle;
 use std::time::Duration;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey,
-    UnregisterHotKey,
-};
+use windows::Win32::UI::Input::KeyboardAndMouse::{MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, MB_ICONERROR, MB_OK, MSG, MessageBoxW, PM_REMOVE, PeekMessageW, SW_HIDE,
-    SW_RESTORE, SWP_NOMOVE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow,
-    TranslateMessage, WM_HOTKEY,
+    MB_ICONERROR, MB_OK, MessageBoxW, SW_HIDE, SW_RESTORE, SWP_NOMOVE, SWP_NOZORDER,
+    SetForegroundWindow, SetWindowPos, ShowWindow,
 };
 use windows::core::{HSTRING, w};
 
 mod assets;
 pub(crate) mod model;
+mod quick_switch;
 
 use assets::{
     configure_fonts, hwnd_from_creation_context, load_tray_icon_base, load_window_icon,
@@ -2849,121 +2845,6 @@ impl AppState {
                 return candidate;
             }
             index += 1;
-        }
-    }
-}
-
-impl QuickSwitchMonitor {
-    fn spawn(
-        ctx: &egui::Context,
-        hwnd: HWND,
-        event_tx: Sender<AppEvent>,
-        window_hidden_flag: Arc<AtomicBool>,
-    ) -> Self {
-        let config = Arc::new(Mutex::new(QuickSwitchWatchConfig::default()));
-        let stop_flag = Arc::new(AtomicBool::new(false));
-
-        let join_config = Arc::clone(&config);
-        let join_stop = Arc::clone(&stop_flag);
-        let join_ctx = ctx.clone();
-        let join_hidden = Arc::clone(&window_hidden_flag);
-        let hwnd_raw = hwnd.0 as isize;
-
-        let join = thread::spawn(move || {
-            let hotkey_id = 0xD1FA;
-            let mut active_config = QuickSwitchWatchConfig::default();
-            let mut registered = false;
-            while !join_stop.load(Ordering::SeqCst) {
-                let snapshot = join_config
-                    .lock()
-                    .map(|guard| guard.clone())
-                    .unwrap_or_default();
-                if snapshot != active_config {
-                    if registered {
-                        unsafe {
-                            let _ = UnregisterHotKey(HWND::default(), hotkey_id);
-                        }
-                        registered = false;
-                    }
-
-                    if let Some(hotkey) = snapshot.hotkey {
-                        let modifiers =
-                            HOT_KEY_MODIFIERS(hotkey_modifiers(hotkey.modifiers) | MOD_NOREPEAT.0);
-                        registered = unsafe {
-                            RegisterHotKey(HWND::default(), hotkey_id, modifiers, hotkey.vk)
-                        }
-                        .is_ok();
-                    }
-                    active_config = snapshot.clone();
-                }
-
-                let mut msg = MSG::default();
-                while unsafe { PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_REMOVE) }.as_bool()
-                {
-                    if msg.message == WM_HOTKEY {
-                        if foreground_window_is(HWND(hwnd_raw as _)) {
-                            continue;
-                        }
-
-                        let is_target = foreground_window_info().as_ref().is_some_and(|info| {
-                            info.matches_any_target(&active_config.target_windows)
-                        });
-                        if !is_target {
-                            continue;
-                        }
-
-                        unsafe {
-                            let hwnd = HWND(hwnd_raw as _);
-                            let _ = SetWindowPos(
-                                hwnd,
-                                HWND::default(),
-                                0,
-                                0,
-                                SWITCHER_WINDOW_WIDTH,
-                                SWITCHER_WINDOW_HEIGHT,
-                                SWP_NOMOVE | SWP_NOZORDER,
-                            );
-                            let _ = ShowWindow(hwnd, SW_RESTORE);
-                            let _ = SetForegroundWindow(hwnd);
-                        }
-                        join_hidden.store(false, Ordering::SeqCst);
-                        let _ = event_tx.send(AppEvent::HotkeyOpenSwitcher);
-                        join_ctx.request_repaint();
-                    } else {
-                        unsafe {
-                            let _ = TranslateMessage(&msg);
-                            DispatchMessageW(&msg);
-                        }
-                    }
-                }
-
-                sleep(QUICK_SWITCH_POLL_INTERVAL);
-            }
-
-            if registered {
-                unsafe {
-                    let _ = UnregisterHotKey(HWND::default(), hotkey_id);
-                }
-            }
-        });
-
-        Self {
-            config,
-            stop_flag,
-            join: Some(join),
-        }
-    }
-
-    fn set_config(&self, config: QuickSwitchWatchConfig) {
-        if let Ok(mut guard) = self.config.lock() {
-            *guard = config;
-        }
-    }
-
-    fn stop(&mut self) {
-        self.stop_flag.store(true, Ordering::SeqCst);
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
         }
     }
 }
