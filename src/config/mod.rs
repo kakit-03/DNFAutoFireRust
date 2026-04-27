@@ -1,4 +1,4 @@
-use crate::input_backend::{BackendSettings, InputBackendKind};
+use crate::input::backend::{BackendSettings, InputBackendKind};
 use crate::keymap::normalize_hotkey_text;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -625,7 +625,7 @@ mod tests {
         DEFAULT_COMBO_STEP_PRESS_DURATION_MS, DEFAULT_POLL_INTERVAL_MS, DEFAULT_PRESS_DURATION_MS,
         DEFAULT_REPEAT_INTERVAL_MS, LinkedTriggerMode, Profile, SpecialKeyConfig,
     };
-    use crate::input_backend::InputBackendKind;
+    use crate::input::backend::InputBackendKind;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 

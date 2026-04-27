@@ -4,7 +4,6 @@ mod config;
 mod gui;
 mod gui_model;
 mod input;
-mod input_backend;
 mod keymap;
 mod single_instance;
 mod timing;

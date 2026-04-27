@@ -5,10 +5,10 @@ use crate::config::{
     LinkedTriggerMode, Profile, SpecialKeyConfig,
 };
 use crate::gui_model::{ProfileDraft, target_windows_from_text, target_windows_to_text};
-use crate::input::is_vk_down;
-use crate::input_backend::{
+use crate::input::backend::{
     InputBackendKind, input_backend_descriptor, input_backend_descriptors, input_backend_label,
 };
+use crate::input::is_vk_down;
 use crate::keymap::{
     HotkeyRegistration, display_hotkey_names, display_hotkey_text, display_key_name,
     hotkey_registration, is_modifier_key, normalize_hotkey_text, parse_hotkey, parse_key_specs,
@@ -4096,7 +4096,7 @@ mod tests {
         SpecialKeyType,
     };
     use crate::config::{ConfigStore, LinkedTriggerMode, SpecialKeyConfig};
-    use crate::input_backend::InputBackendKind;
+    use crate::input::backend::InputBackendKind;
     use std::collections::HashSet;
     use std::fs;
     use std::path::PathBuf;

@@ -1,5 +1,5 @@
 use crate::config::{ComboStepConfig, LinkedTriggerMode, Profile, SpecialKeyConfig};
-use crate::input_backend::{
+use crate::input::backend::{
     BackendSettings, InputBackend, InputBackendKind, InputSnapshot, create_input_backend,
     input_backend_label,
 };
@@ -1244,7 +1244,7 @@ mod tests {
     use crate::config::{
         ComboConfig, ComboStepConfig, LinkedTriggerMode, Profile, SpecialKeyConfig,
     };
-    use crate::input_backend::{
+    use crate::input::backend::{
         InputBackend, InputBackendCapabilities, InputSnapshot, resolve_effective_key_down,
     };
     use crate::keymap::{KeySpec, parse_single_key};
