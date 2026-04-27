@@ -3,7 +3,6 @@ mod cli;
 mod config;
 mod gui;
 mod gui_model;
-mod initial_config;
 mod input;
 mod input_backend;
 mod keymap;

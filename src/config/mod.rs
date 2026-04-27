@@ -1,4 +1,3 @@
-use crate::initial_config::INITIAL_CONFIG_JSON;
 use crate::input_backend::{BackendSettings, InputBackendKind};
 use crate::keymap::normalize_hotkey_text;
 use anyhow::{Context, Result, bail};
@@ -6,6 +5,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::Path;
+
+mod initial;
+
+use initial::INITIAL_CONFIG_JSON;
 
 const DEFAULT_PROFILE_NAME: &str = "default";
 const DEFAULT_KEYS: [&str; 1] = ["J"];
