@@ -200,7 +200,10 @@ pub type BackendSettings = BTreeMap<String, Value>;
 
 #[cfg(test)]
 mod tests {
-    use super::{InputBackendKind, create_input_backend, resolve_effective_key_down};
+    use super::{
+        InputBackendKind, create_input_backend, input_backend_descriptor,
+        input_backend_descriptors, resolve_effective_key_down,
+    };
     use std::collections::BTreeMap;
 
     #[test]
@@ -220,7 +223,22 @@ mod tests {
             Ok(_) => panic!("hook backend is only an unavailable placeholder"),
             Err(err) => err,
         };
-        assert!(err.to_string().contains("暂不可用"));
+        let message = err.to_string();
+        assert!(message.contains("Hook + SendInput"));
+        assert!(message.contains("暂不可用"));
+        assert!(message.contains("尚未接入钩子事件循环"));
+    }
+
+    #[test]
+    fn backend_descriptors_mark_default_available() {
+        let descriptor = input_backend_descriptor(InputBackendKind::SendInputPolling);
+        assert!(descriptor.available);
+        assert_eq!(descriptor.unavailable_reason, None);
+        assert!(
+            input_backend_descriptors()
+                .iter()
+                .any(|item| item.kind == InputBackendKind::SendInputPolling && item.available)
+        );
     }
 
     #[test]

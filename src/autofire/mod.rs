@@ -348,7 +348,8 @@ mod tests {
         ComboConfig, ComboStepConfig, LinkedTriggerMode, Profile, SpecialKeyConfig,
     };
     use crate::input::backend::{
-        InputBackend, InputBackendCapabilities, InputSnapshot, resolve_effective_key_down,
+        InputBackend, InputBackendCapabilities, InputBackendKind, InputSnapshot,
+        resolve_effective_key_down,
     };
     use crate::keymap::{KeySpec, parse_single_key};
     use crate::timing::HighPrecisionSleeper;
@@ -484,6 +485,19 @@ mod tests {
     }
 
     #[test]
+    fn runtime_profile_retains_selected_input_backend() {
+        let profile = Profile::default();
+        let runtime = super::RuntimeProfile::from_profile_with_backend(
+            &profile,
+            &["DNF".to_string()],
+            InputBackendKind::MessageBackend,
+        )
+        .expect("runtime profile");
+
+        assert_eq!(runtime.input_backend, InputBackendKind::MessageBackend);
+    }
+
+    #[test]
     fn synthetic_hold_keeps_previous_physical_state() {
         assert!(resolve_effective_key_down(true, false, true));
         assert!(!resolve_effective_key_down(false, true, true));
@@ -577,6 +591,45 @@ mod tests {
             first.map(|command| command.source),
             Some(CommandSource::Repeat(0))
         ));
+    }
+
+    #[test]
+    fn command_queue_cancel_source_only_removes_matching_commands() {
+        let key_a = parse_single_key("A").expect("A");
+        let key_b = parse_single_key("B").expect("B");
+        let now = Instant::now();
+        let mut queue = CommandQueue::default();
+
+        queue.enqueue(QueuedCommand {
+            source: CommandSource::Repeat(0),
+            key: key_a,
+            ready_at: now,
+            press_duration: Duration::from_millis(1),
+        });
+        queue.enqueue(QueuedCommand {
+            source: CommandSource::Combo(0),
+            key: key_b,
+            ready_at: now,
+            press_duration: Duration::from_millis(1),
+        });
+        queue.enqueue(QueuedCommand {
+            source: CommandSource::Repeat(0),
+            key: key_a,
+            ready_at: now + Duration::from_millis(1),
+            press_duration: Duration::from_millis(1),
+        });
+
+        queue.cancel_source(CommandSource::Repeat(0));
+
+        let remaining = queue
+            .pop_next_ready(now + Duration::from_millis(2))
+            .expect("combo command remains");
+        assert!(matches!(remaining.source, CommandSource::Combo(0)));
+        assert!(
+            queue
+                .pop_next_ready(now + Duration::from_millis(2))
+                .is_none()
+        );
     }
 
     #[test]

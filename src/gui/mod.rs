@@ -688,6 +688,10 @@ mod tests {
                 .set_input_backend(InputBackendKind::MessageBackend)
                 .is_err()
         );
+        assert_eq!(
+            state.store.input_backend,
+            InputBackendKind::SendInputPolling
+        );
 
         let saved = ConfigStore::load_or_create(&path).expect("load saved config");
         assert_eq!(saved.input_backend, InputBackendKind::SendInputPolling);

@@ -306,3 +306,99 @@ fn validate_profile_bindings(profile: &Profile, quick_switch_hotkey: &str) -> Re
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{ConfigAction, handle_config_action, validate_profile_bindings};
+    use crate::config::{
+        ComboConfig, ComboStepConfig, ConfigStore, DEFAULT_POLL_INTERVAL_MS, Profile,
+        SpecialKeyConfig,
+    };
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn profile_bindings_reject_auto_trigger_quick_switch_conflict() {
+        let profile = Profile {
+            enabled_keys: vec!["J".to_string()],
+            repeat_interval_ms: 1,
+            press_duration_ms: 1,
+            poll_interval_ms: 1,
+            combos: Vec::new(),
+            special_keys: vec![SpecialKeyConfig::AutoTrigger {
+                name: "auto".to_string(),
+                key: "SPACE".to_string(),
+                trigger_hotkey: "LALT+Q".to_string(),
+                repeat_interval_ms: 1,
+                press_duration_ms: 1,
+            }],
+        };
+
+        let err = validate_profile_bindings(&profile, "LALT+Q")
+            .expect_err("matching quick switch hotkey should be rejected");
+        assert!(err.to_string().contains("冲突"));
+    }
+
+    #[test]
+    fn config_save_preserves_existing_combos_and_special_keys() {
+        let path = unique_test_config_path();
+        let mut store = ConfigStore::default();
+        let profile = Profile {
+            enabled_keys: vec!["J".to_string()],
+            repeat_interval_ms: 1,
+            press_duration_ms: 1,
+            poll_interval_ms: 1,
+            combos: vec![ComboConfig {
+                name: "burst".to_string(),
+                trigger_key: "U".to_string(),
+                steps: vec![ComboStepConfig {
+                    key: "A".to_string(),
+                    interval_ms: 8,
+                    press_duration_ms: 1,
+                }],
+                sequence_keys: Vec::new(),
+                step_interval_ms: 0,
+                press_duration_ms: 0,
+            }],
+            special_keys: vec![SpecialKeyConfig::CustomAutofire {
+                name: "custom".to_string(),
+                key: "O".to_string(),
+                repeat_interval_ms: 2,
+                press_duration_ms: 1,
+            }],
+        };
+        store.upsert_profile("raid".to_string(), profile);
+
+        handle_config_action(
+            &mut store,
+            &path,
+            ConfigAction::Save {
+                name: "raid".to_string(),
+                keys: vec!["K".to_string()],
+                repeat_interval_ms: 12,
+                press_duration_ms: 3,
+                poll_interval_ms: DEFAULT_POLL_INTERVAL_MS,
+                windows: Vec::new(),
+            },
+        )
+        .expect("config save should succeed");
+
+        let saved = ConfigStore::load_or_create(&path).expect("load saved config");
+        let profile = saved.get_profile(Some("raid")).expect("saved profile");
+        assert_eq!(profile.enabled_keys, vec!["K"]);
+        assert_eq!(profile.combos.len(), 1);
+        assert_eq!(profile.combos[0].name, "burst");
+        assert_eq!(profile.special_keys.len(), 1);
+        assert_eq!(profile.special_keys[0].name(), "custom");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn unique_test_config_path() -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("dnf_cli_test_{nanos}.json"))
+    }
+}
