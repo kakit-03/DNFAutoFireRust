@@ -4,7 +4,7 @@ use crate::config::{
     DEFAULT_COMBO_STEP_PRESS_DURATION_MS, DEFAULT_PRESS_DURATION_MS, DEFAULT_REPEAT_INTERVAL_MS,
     LinkedTriggerMode, Profile, SpecialKeyConfig,
 };
-use crate::gui_model::{ProfileDraft, target_windows_from_text, target_windows_to_text};
+use crate::gui::model::{ProfileDraft, target_windows_from_text, target_windows_to_text};
 use crate::input::backend::{
     InputBackendKind, input_backend_descriptor, input_backend_descriptors, input_backend_label,
 };
@@ -46,6 +46,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     TranslateMessage, WM_HOTKEY,
 };
 use windows::core::{HSTRING, w};
+
+pub(crate) mod model;
 
 const STATUS_IDLE: &str = "状态: 未运行";
 const STATUS_RUNNING: &str = "状态: 运行中";
