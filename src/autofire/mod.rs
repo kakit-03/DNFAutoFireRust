@@ -13,6 +13,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+mod command_queue;
+
+use command_queue::{CommandQueue, CommandSource, QueuedCommand};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
     StopRequested,
@@ -352,56 +356,6 @@ impl Default for ComboState {
 #[derive(Default)]
 struct LinkedBindingState {
     trigger_down: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CommandSource {
-    Repeat(usize),
-    Combo(usize),
-    Linked(usize),
-}
-
-#[derive(Clone, Copy)]
-struct QueuedCommand {
-    source: CommandSource,
-    key: KeySpec,
-    ready_at: Instant,
-    press_duration: Duration,
-}
-
-#[derive(Default)]
-struct CommandQueue {
-    pending: Vec<QueuedCommand>,
-}
-
-impl CommandQueue {
-    fn clear(&mut self) {
-        self.pending.clear();
-    }
-
-    fn enqueue(&mut self, command: QueuedCommand) {
-        self.pending.push(command);
-        self.pending.sort_by_key(|item| item.ready_at);
-    }
-
-    fn cancel_source(&mut self, source: CommandSource) {
-        self.pending.retain(|item| item.source != source);
-    }
-
-    fn next_ready_at(&self) -> Option<Instant> {
-        self.pending.iter().map(|item| item.ready_at).min()
-    }
-
-    fn pop_next_ready(&mut self, now: Instant) -> Option<QueuedCommand> {
-        let next_index = self
-            .pending
-            .iter()
-            .enumerate()
-            .filter(|(_, item)| item.ready_at <= now)
-            .min_by_key(|(_, item)| item.ready_at)
-            .map(|(index, _)| index)?;
-        Some(self.pending.remove(next_index))
-    }
 }
 
 impl RuntimeProfile {
