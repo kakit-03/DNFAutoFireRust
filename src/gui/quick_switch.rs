@@ -1,3 +1,5 @@
+// Listens for the global quick-switch hotkey while the app is hidden.
+
 use crate::platform::window::{foreground_window_info, foreground_window_is};
 use eframe::egui;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -78,6 +80,7 @@ impl QuickSwitchMonitor {
 
                         unsafe {
                             let hwnd = HWND(hwnd_raw as _);
+                            let _ = ShowWindow(hwnd, SW_RESTORE);
                             let _ = SetWindowPos(
                                 hwnd,
                                 HWND::default(),
@@ -87,7 +90,6 @@ impl QuickSwitchMonitor {
                                 SWITCHER_WINDOW_HEIGHT,
                                 SWP_NOMOVE | SWP_NOZORDER,
                             );
-                            let _ = ShowWindow(hwnd, SW_RESTORE);
                             let _ = SetForegroundWindow(hwnd);
                         }
                         join_hidden.store(false, Ordering::SeqCst);

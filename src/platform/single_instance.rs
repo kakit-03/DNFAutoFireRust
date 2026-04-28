@@ -1,3 +1,5 @@
+// Enforces a single running GUI instance with a named mutex.
+
 use anyhow::{Result, bail};
 use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
 use windows::Win32::System::Threading::CreateMutexW;

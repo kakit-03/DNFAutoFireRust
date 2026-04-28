@@ -1,3 +1,5 @@
+// Builds normalized runtime profiles from persisted configuration.
+
 use crate::config::{ComboStepConfig, LinkedTriggerMode, Profile, SpecialKeyConfig};
 use crate::input::backend::{InputBackendKind, input_backend_label};
 use crate::keymap::{KeySpec, parse_hotkey, parse_key_specs, parse_single_key};

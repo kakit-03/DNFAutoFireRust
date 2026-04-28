@@ -1,3 +1,5 @@
+// Stores the built-in initial configuration template.
+
 pub const INITIAL_CONFIG_JSON: &str = r#"{
   "default_profile": "默认配置",
   "quick_switch_hotkey": "LALT+BACKQUOTE",

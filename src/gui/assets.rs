@@ -1,3 +1,5 @@
+// Loads GUI fonts, icons, assets, and native window handles.
+
 use anyhow::{Context, Result, bail};
 use eframe::CreationContext;
 use eframe::egui::{self, FontData, FontDefinitions, FontFamily};

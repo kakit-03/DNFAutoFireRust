@@ -1,3 +1,5 @@
+// Provides high-precision sleep and scheduler timing calibration.
+
 use std::ffi::c_void;
 use std::hint::spin_loop;
 use std::mem::size_of;

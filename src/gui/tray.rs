@@ -1,3 +1,5 @@
+// Builds tray icons, menu items, and tray event dispatch.
+
 use eframe::egui;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

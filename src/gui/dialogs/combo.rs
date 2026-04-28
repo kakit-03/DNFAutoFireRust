@@ -1,3 +1,5 @@
+// Renders combo editing and capture dialogs.
+
 use super::*;
 
 impl EguiApp {

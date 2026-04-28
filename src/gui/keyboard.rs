@@ -1,3 +1,5 @@
+// Renders the virtual keyboard panel and key layout metadata.
+
 use crate::keymap::parse_single_key;
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 
@@ -33,6 +35,13 @@ struct KeyboardCell {
     width_units: f32,
 }
 
+fn cell(token: &'static str, label: &'static str, width_units: f32) -> KeyboardCell {
+    KeyboardCell {
+        token,
+        label,
+        width_units,
+    }
+}
 impl EguiApp {
     pub(super) fn render_keyboard_panel(&mut self, ui: &mut egui::Ui) {
         egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -136,41 +145,16 @@ fn keyboard_layout_keys() -> Vec<KeyboardLayoutKey> {
     let num_x = nav_x + keyboard_units_to_px(3.0) + KEYBOARD_BLOCK_GAP;
 
     let row0 = keyboard_row_y(0.0);
-    push_keyboard_row(
-        &mut keys,
-        main_x,
-        row0,
-        &[KeyboardCell {
-            token: "ESC",
-            label: "Esc",
-            width_units: 1.0,
-        }],
-    );
+    push_keyboard_row(&mut keys, main_x, row0, &[cell("ESC", "Esc", 1.0)]);
     push_keyboard_row(
         &mut keys,
         main_x + keyboard_units_to_px(2.0),
         row0,
         &[
-            KeyboardCell {
-                token: "F1",
-                label: "F1",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "F2",
-                label: "F2",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "F3",
-                label: "F3",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "F4",
-                label: "F4",
-                width_units: 1.0,
-            },
+            cell("F1", "F1", 1.0),
+            cell("F2", "F2", 1.0),
+            cell("F3", "F3", 1.0),
+            cell("F4", "F4", 1.0),
         ],
     );
     push_keyboard_row(
@@ -178,26 +162,10 @@ fn keyboard_layout_keys() -> Vec<KeyboardLayoutKey> {
         main_x + keyboard_units_to_px(6.0) + KEYBOARD_BLOCK_GAP,
         row0,
         &[
-            KeyboardCell {
-                token: "F5",
-                label: "F5",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "F6",
-                label: "F6",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "F7",
-                label: "F7",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "F8",
-                label: "F8",
-                width_units: 1.0,
-            },
+            cell("F5", "F5", 1.0),
+            cell("F6", "F6", 1.0),
+            cell("F7", "F7", 1.0),
+            cell("F8", "F8", 1.0),
         ],
     );
     push_keyboard_row(
@@ -205,26 +173,10 @@ fn keyboard_layout_keys() -> Vec<KeyboardLayoutKey> {
         main_x + keyboard_units_to_px(10.0) + KEYBOARD_BLOCK_GAP * 2.0,
         row0,
         &[
-            KeyboardCell {
-                token: "F9",
-                label: "F9",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "F10",
-                label: "F10",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "F11",
-                label: "F11",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "F12",
-                label: "F12",
-                width_units: 1.0,
-            },
+            cell("F9", "F9", 1.0),
+            cell("F10", "F10", 1.0),
+            cell("F11", "F11", 1.0),
+            cell("F12", "F12", 1.0),
         ],
     );
     push_keyboard_row(
@@ -232,21 +184,9 @@ fn keyboard_layout_keys() -> Vec<KeyboardLayoutKey> {
         nav_x,
         row0,
         &[
-            KeyboardCell {
-                token: "PRINTSCREEN",
-                label: "PrtSc",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "SCROLLLOCK",
-                label: "ScrLk",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "PAUSE",
-                label: "Pause",
-                width_units: 1.0,
-            },
+            cell("PRINTSCREEN", "PrtSc", 1.0),
+            cell("SCROLLLOCK", "ScrLk", 1.0),
+            cell("PAUSE", "Pause", 1.0),
         ],
     );
 
@@ -255,76 +195,20 @@ fn keyboard_layout_keys() -> Vec<KeyboardLayoutKey> {
         main_x,
         keyboard_row_y(1.0),
         &[
-            KeyboardCell {
-                token: "BACKQUOTE",
-                label: "~",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "1",
-                label: "1",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "2",
-                label: "2",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "3",
-                label: "3",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "4",
-                label: "4",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "5",
-                label: "5",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "6",
-                label: "6",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "7",
-                label: "7",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "8",
-                label: "8",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "9",
-                label: "9",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "0",
-                label: "0",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "MINUS",
-                label: "-",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "EQUAL",
-                label: "=",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "BACKSPACE",
-                label: "Bksp",
-                width_units: 2.0,
-            },
+            cell("BACKQUOTE", "~", 1.0),
+            cell("1", "1", 1.0),
+            cell("2", "2", 1.0),
+            cell("3", "3", 1.0),
+            cell("4", "4", 1.0),
+            cell("5", "5", 1.0),
+            cell("6", "6", 1.0),
+            cell("7", "7", 1.0),
+            cell("8", "8", 1.0),
+            cell("9", "9", 1.0),
+            cell("0", "0", 1.0),
+            cell("MINUS", "-", 1.0),
+            cell("EQUAL", "=", 1.0),
+            cell("BACKSPACE", "Bksp", 2.0),
         ],
     );
     push_keyboard_row(
@@ -332,21 +216,9 @@ fn keyboard_layout_keys() -> Vec<KeyboardLayoutKey> {
         nav_x,
         keyboard_row_y(1.0),
         &[
-            KeyboardCell {
-                token: "INSERT",
-                label: "Ins",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "HOME",
-                label: "Home",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "PAGEUP",
-                label: "PgUp",
-                width_units: 1.0,
-            },
+            cell("INSERT", "Ins", 1.0),
+            cell("HOME", "Home", 1.0),
+            cell("PAGEUP", "PgUp", 1.0),
         ],
     );
     push_keyboard_row(
@@ -354,26 +226,10 @@ fn keyboard_layout_keys() -> Vec<KeyboardLayoutKey> {
         num_x,
         keyboard_row_y(1.0),
         &[
-            KeyboardCell {
-                token: "NUMLOCK",
-                label: "Num",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "NUMDIV",
-                label: "/",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "NUMMUL",
-                label: "*",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "NUMMINUS",
-                label: "-",
-                width_units: 1.0,
-            },
+            cell("NUMLOCK", "Num", 1.0),
+            cell("NUMDIV", "/", 1.0),
+            cell("NUMMUL", "*", 1.0),
+            cell("NUMMINUS", "-", 1.0),
         ],
     );
 
@@ -382,76 +238,20 @@ fn keyboard_layout_keys() -> Vec<KeyboardLayoutKey> {
         main_x,
         keyboard_row_y(2.0),
         &[
-            KeyboardCell {
-                token: "TAB",
-                label: "Tab",
-                width_units: 2.0,
-            },
-            KeyboardCell {
-                token: "Q",
-                label: "Q",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "W",
-                label: "W",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "E",
-                label: "E",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "R",
-                label: "R",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "T",
-                label: "T",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "Y",
-                label: "Y",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "U",
-                label: "U",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "I",
-                label: "I",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "O",
-                label: "O",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "P",
-                label: "P",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "LBRACKET",
-                label: "[",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "RBRACKET",
-                label: "]",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "BACKSLASH",
-                label: "\\",
-                width_units: 2.0,
-            },
+            cell("TAB", "Tab", 2.0),
+            cell("Q", "Q", 1.0),
+            cell("W", "W", 1.0),
+            cell("E", "E", 1.0),
+            cell("R", "R", 1.0),
+            cell("T", "T", 1.0),
+            cell("Y", "Y", 1.0),
+            cell("U", "U", 1.0),
+            cell("I", "I", 1.0),
+            cell("O", "O", 1.0),
+            cell("P", "P", 1.0),
+            cell("LBRACKET", "[", 1.0),
+            cell("RBRACKET", "]", 1.0),
+            cell("BACKSLASH", "\\", 2.0),
         ],
     );
     push_keyboard_row(
@@ -459,21 +259,9 @@ fn keyboard_layout_keys() -> Vec<KeyboardLayoutKey> {
         nav_x,
         keyboard_row_y(2.0),
         &[
-            KeyboardCell {
-                token: "DELETE",
-                label: "Del",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "END",
-                label: "End",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "PAGEDOWN",
-                label: "PgDn",
-                width_units: 1.0,
-            },
+            cell("DELETE", "Del", 1.0),
+            cell("END", "End", 1.0),
+            cell("PAGEDOWN", "PgDn", 1.0),
         ],
     );
     push_keyboard_row(
@@ -481,26 +269,10 @@ fn keyboard_layout_keys() -> Vec<KeyboardLayoutKey> {
         num_x,
         keyboard_row_y(2.0),
         &[
-            KeyboardCell {
-                token: "NUM7",
-                label: "7",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "NUM8",
-                label: "8",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "NUM9",
-                label: "9",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "NUMPLUS",
-                label: "+",
-                width_units: 1.0,
-            },
+            cell("NUM7", "7", 1.0),
+            cell("NUM8", "8", 1.0),
+            cell("NUM9", "9", 1.0),
+            cell("NUMPLUS", "+", 1.0),
         ],
     );
 
@@ -509,71 +281,19 @@ fn keyboard_layout_keys() -> Vec<KeyboardLayoutKey> {
         main_x,
         keyboard_row_y(3.0),
         &[
-            KeyboardCell {
-                token: "CAPSLOCK",
-                label: "Caps",
-                width_units: 2.0,
-            },
-            KeyboardCell {
-                token: "A",
-                label: "A",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "S",
-                label: "S",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "D",
-                label: "D",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "F",
-                label: "F",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "G",
-                label: "G",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "H",
-                label: "H",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "J",
-                label: "J",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "K",
-                label: "K",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "L",
-                label: "L",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "SEMICOLON",
-                label: ";",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "APOSTROPHE",
-                label: "'",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "ENTER",
-                label: "Enter",
-                width_units: 3.0,
-            },
+            cell("CAPSLOCK", "Caps", 2.0),
+            cell("A", "A", 1.0),
+            cell("S", "S", 1.0),
+            cell("D", "D", 1.0),
+            cell("F", "F", 1.0),
+            cell("G", "G", 1.0),
+            cell("H", "H", 1.0),
+            cell("J", "J", 1.0),
+            cell("K", "K", 1.0),
+            cell("L", "L", 1.0),
+            cell("SEMICOLON", ";", 1.0),
+            cell("APOSTROPHE", "'", 1.0),
+            cell("ENTER", "Enter", 3.0),
         ],
     );
     push_keyboard_row(
@@ -581,26 +301,10 @@ fn keyboard_layout_keys() -> Vec<KeyboardLayoutKey> {
         num_x,
         keyboard_row_y(3.0),
         &[
-            KeyboardCell {
-                token: "NUM4",
-                label: "4",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "NUM5",
-                label: "5",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "NUM6",
-                label: "6",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "NUMENTER",
-                label: "Ent",
-                width_units: 1.0,
-            },
+            cell("NUM4", "4", 1.0),
+            cell("NUM5", "5", 1.0),
+            cell("NUM6", "6", 1.0),
+            cell("NUMENTER", "Ent", 1.0),
         ],
     );
 
@@ -609,98 +313,34 @@ fn keyboard_layout_keys() -> Vec<KeyboardLayoutKey> {
         main_x,
         keyboard_row_y(4.0),
         &[
-            KeyboardCell {
-                token: "LSHIFT",
-                label: "LShift",
-                width_units: 3.0,
-            },
-            KeyboardCell {
-                token: "Z",
-                label: "Z",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "X",
-                label: "X",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "C",
-                label: "C",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "V",
-                label: "V",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "B",
-                label: "B",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "N",
-                label: "N",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "M",
-                label: "M",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "COMMA",
-                label: ",",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "PERIOD",
-                label: ".",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "SLASH",
-                label: "/",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "RSHIFT",
-                label: "RShift",
-                width_units: 3.0,
-            },
+            cell("LSHIFT", "LShift", 3.0),
+            cell("Z", "Z", 1.0),
+            cell("X", "X", 1.0),
+            cell("C", "C", 1.0),
+            cell("V", "V", 1.0),
+            cell("B", "B", 1.0),
+            cell("N", "N", 1.0),
+            cell("M", "M", 1.0),
+            cell("COMMA", ",", 1.0),
+            cell("PERIOD", ".", 1.0),
+            cell("SLASH", "/", 1.0),
+            cell("RSHIFT", "RShift", 3.0),
         ],
     );
     push_keyboard_row(
         &mut keys,
         nav_x + keyboard_units_to_px(1.0),
         keyboard_row_y(4.0),
-        &[KeyboardCell {
-            token: "UP",
-            label: "Up",
-            width_units: 1.0,
-        }],
+        &[cell("UP", "Up", 1.0)],
     );
     push_keyboard_row(
         &mut keys,
         num_x,
         keyboard_row_y(4.0),
         &[
-            KeyboardCell {
-                token: "NUM1",
-                label: "1",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "NUM2",
-                label: "2",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "NUM3",
-                label: "3",
-                width_units: 1.0,
-            },
+            cell("NUM1", "1", 1.0),
+            cell("NUM2", "2", 1.0),
+            cell("NUM3", "3", 1.0),
         ],
     );
 
@@ -709,46 +349,14 @@ fn keyboard_layout_keys() -> Vec<KeyboardLayoutKey> {
         main_x,
         keyboard_row_y(5.0),
         &[
-            KeyboardCell {
-                token: "LCTRL",
-                label: "LCtrl",
-                width_units: 2.0,
-            },
-            KeyboardCell {
-                token: "LWIN",
-                label: "Win",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "LALT",
-                label: "LAlt",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "SPACE",
-                label: "Space",
-                width_units: 6.0,
-            },
-            KeyboardCell {
-                token: "RALT",
-                label: "RAlt",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "RWIN",
-                label: "Win",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "MENU",
-                label: "Menu",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "RCTRL",
-                label: "RCtrl",
-                width_units: 3.0,
-            },
+            cell("LCTRL", "LCtrl", 2.0),
+            cell("LWIN", "Win", 1.0),
+            cell("LALT", "LAlt", 1.0),
+            cell("SPACE", "Space", 6.0),
+            cell("RALT", "RAlt", 1.0),
+            cell("RWIN", "Win", 1.0),
+            cell("MENU", "Menu", 1.0),
+            cell("RCTRL", "RCtrl", 3.0),
         ],
     );
     push_keyboard_row(
@@ -756,39 +364,16 @@ fn keyboard_layout_keys() -> Vec<KeyboardLayoutKey> {
         nav_x,
         keyboard_row_y(5.0),
         &[
-            KeyboardCell {
-                token: "LEFT",
-                label: "Left",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "DOWN",
-                label: "Down",
-                width_units: 1.0,
-            },
-            KeyboardCell {
-                token: "RIGHT",
-                label: "Right",
-                width_units: 1.0,
-            },
+            cell("LEFT", "Left", 1.0),
+            cell("DOWN", "Down", 1.0),
+            cell("RIGHT", "Right", 1.0),
         ],
     );
     push_keyboard_row(
         &mut keys,
         num_x,
         keyboard_row_y(5.0),
-        &[
-            KeyboardCell {
-                token: "NUM0",
-                label: "0",
-                width_units: 2.0,
-            },
-            KeyboardCell {
-                token: "NUMDOT",
-                label: ".",
-                width_units: 1.0,
-            },
-        ],
+        &[cell("NUM0", "0", 2.0), cell("NUMDOT", ".", 1.0)],
     );
 
     keys

@@ -1,4 +1,6 @@
 #![cfg_attr(
+// Starts the binary entry point with Windows subsystem settings.
+
     all(target_os = "windows", not(debug_assertions)),
     windows_subsystem = "windows"
 )]

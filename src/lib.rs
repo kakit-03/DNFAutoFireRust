@@ -1,3 +1,5 @@
+// Exposes the application library entry points for the binary.
+
 mod autofire;
 mod cli;
 mod config;

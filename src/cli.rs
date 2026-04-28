@@ -1,3 +1,5 @@
+// Parses CLI commands and applies configuration actions.
+
 use crate::autofire;
 use crate::config::{
     ComboConfig, ComboStepConfig, ConfigStore, DEFAULT_COMBO_STEP_INTERVAL_MS,

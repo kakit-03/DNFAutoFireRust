@@ -1,3 +1,5 @@
+// Queues ready keyboard commands by runtime source and scheduled time.
+
 use crate::keymap::KeySpec;
 use std::time::{Duration, Instant};
 

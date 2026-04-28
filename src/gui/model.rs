@@ -1,3 +1,5 @@
+// Maps persisted profiles to editable GUI draft models.
+
 use crate::config::{ComboConfig, Profile, SpecialKeyConfig};
 use anyhow::{Result, bail};
 use std::collections::HashSet;

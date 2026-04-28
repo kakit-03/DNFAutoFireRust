@@ -1,3 +1,5 @@
+// Renders special-key editing and capture dialogs.
+
 use super::*;
 
 impl EguiApp {

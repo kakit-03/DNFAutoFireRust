@@ -1,3 +1,5 @@
+// Wraps low-level Windows keyboard input and key-state helpers.
+
 use crate::keymap::KeySpec;
 use crate::timing::HighPrecisionSleeper;
 use std::collections::HashMap;

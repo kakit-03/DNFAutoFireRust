@@ -34,8 +34,8 @@ GUI 特性：
 - 下半中间为“其他配置”，当前包含“一键连招”和“特殊键位配置”两块能力
 - 快速切换热键改为全局配置；输入框只显示当前热键，不支持手输，点“录入热键”后直接按组合键即可，录入成功后会立即持久化；热键按系统热键语义工作，建议使用“修饰键 + 一个主键”
 - 目标窗口关键字也改为全局配置；在 GUI 中修改有效内容后会立即持久化，连发运行和快速切换窗口唤起都会共用这组关键字
-- 输入后端为全局配置；运行中会锁定后端选择，实验后端会灰显并展示不可用原因
-- 在连发目标窗口中按下快速切换热键时，会弹出一个小型切换窗口：只显示配置列表，底部提供“切换并启动连发”“停止连发”两个按钮
+- 输入后端为全局配置；运行中会锁定后端选择，可在 `SendInput 轮询`、`Hook + SendInput`、`窗口消息`、`外部脚本`、`HID 串口` 之间切换
+- 在连发目标窗口中按下快速切换热键时，会弹出配置切换窗口：只显示配置列表，底部提供“切换并启动连发”“停止连发”两个按钮
 - 小型切换窗口支持键盘 `↑ / ↓` 选择配置，`Enter` 直接切换并启动，`Esc` 隐藏回系统托盘
 - 连招使用应用内弹窗编辑，支持键盘录入触发键、单步录入、连续录入、删除、上移、下移
 - 每个连招步骤都可以单独配置自己的间隔时间和按下时长
@@ -108,6 +108,32 @@ cargo run -- config delete --name my-dnf
 - 全局 `backend_settings`: `{}`
 - `combos`: `[]`
 - `special_keys`: `[]`
+
+可选后端说明：
+
+- `send_input_polling`: 默认方案，轮询物理按键并通过 `SendInput` 扫描码发键
+- `hook_send_input`: 使用低级键盘钩子采集按键状态，仍通过 `SendInput` 发键
+- `message_backend`: 对当前目标窗口投递键盘消息，主要用于兼容性测试
+- `sidecar_macro`: 调用外部 AutoHotkey/Python 等脚本；未配置脚本时会退回 `SendInput` 兼容发送
+- `hid_serial`: 向串口 HID 设备写入按键事件；未配置串口或写入失败时会退回 `SendInput` 兼容发送
+
+`backend_settings` 示例：
+
+```json
+{
+  "hook_send_input": {
+    "pause_on_mouse_button": true,
+    "mouse_resume_delay_ms": 120
+  },
+  "sidecar_macro": {
+    "executable": "autofire-helper.exe",
+    "args": ["{key}", "{duration_ms}"]
+  },
+  "hid_serial": {
+    "port": "COM3"
+  }
+}
+```
 
 之后每次通过 GUI 或 `cargo run -- run --profile <name>` 成功启动连发时，程序都会自动把该已保存配置记为下次的默认配置。
 

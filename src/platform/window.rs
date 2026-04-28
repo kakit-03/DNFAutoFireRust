@@ -1,3 +1,5 @@
+// Detects foreground windows and IME state for target matching.
+
 use std::path::Path;
 use windows::Win32::Foundation::{CloseHandle, HWND};
 use windows::Win32::System::ProcessStatus::GetProcessImageFileNameW;
